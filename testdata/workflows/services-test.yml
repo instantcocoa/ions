@@ -1,0 +1,32 @@
+name: Service Containers Test
+on: push
+
+jobs:
+  test-postgres:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: testdb
+        ports:
+          - 15432:5432
+    steps:
+      - name: Wait for postgres
+        run: |
+          for i in $(seq 1 30); do
+            if (echo > /dev/tcp/localhost/15432) 2>/dev/null; then
+              echo "Postgres is accepting connections on port 15432!"
+              exit 0
+            fi
+            echo "Waiting for postgres... ($i/30)"
+            sleep 1
+          done
+          echo "Postgres did not become ready on port 15432"
+          exit 1
+
+      - name: Verify postgres is healthy
+        run: |
+          echo "Postgres service container is running and accepting connections"
+          echo "Service test passed!"

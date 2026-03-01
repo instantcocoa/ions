@@ -1,0 +1,20 @@
+name: Matrix Build
+on: push
+
+jobs:
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        node: [18, 20, 22, 24]
+    steps:
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - name: Verify
+        run: |
+          echo "Node version: $(node --version)"
+          echo "OS: ${{ matrix.os }}"

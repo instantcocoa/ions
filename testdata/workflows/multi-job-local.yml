@@ -1,0 +1,53 @@
+name: Multi Job Local
+on: push
+
+env:
+  GLOBAL_VAR: ions-test
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      sha: ${{ steps.sha.outputs.short_sha }}
+    steps:
+      - name: Set version
+        id: version
+        run: echo "version=1.2.3" >> "$GITHUB_OUTPUT"
+      - name: Set SHA
+        id: sha
+        run: echo "short_sha=abc1234" >> "$GITHUB_OUTPUT"
+      - name: Build artifact
+        env:
+          BUILD_MODE: release
+        run: |
+          echo "Building version ${{ steps.version.outputs.version }}"
+          echo "Mode: $BUILD_MODE"
+          echo "Global: $GLOBAL_VAR"
+
+  test:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run unit tests
+        run: |
+          echo "Testing version ${{ needs.build.outputs.version }}"
+          echo "SHA: ${{ needs.build.outputs.sha }}"
+      - name: Run integration tests
+        run: echo "Integration tests passed"
+
+  deploy:
+    needs: [build, test]
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Check prerequisites
+        run: |
+          echo "Build version: ${{ needs.build.outputs.version }}"
+          echo "Build result: ${{ needs.build.result }}"
+          echo "Test result: ${{ needs.test.result }}"
+      - name: Deploy
+        if: needs.build.result == 'success' && needs.test.result == 'success'
+        run: echo "Deploying version ${{ needs.build.outputs.version }} to production"
+      - name: Notify
+        run: echo "Deployment complete"

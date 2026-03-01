@@ -1,0 +1,47 @@
+name: Step Outputs Test
+on: push
+
+jobs:
+  chained-steps:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Generate data
+        id: gen
+        run: |
+          echo "timestamp=$(date +%s)" >> $GITHUB_OUTPUT
+          echo "random=$RANDOM" >> $GITHUB_OUTPUT
+          echo "message=hello from step 1" >> $GITHUB_OUTPUT
+
+      - name: Use step outputs
+        run: |
+          echo "Timestamp: ${{ steps.gen.outputs.timestamp }}"
+          echo "Random: ${{ steps.gen.outputs.random }}"
+          echo "Message: ${{ steps.gen.outputs.message }}"
+          if [ -z "${{ steps.gen.outputs.timestamp }}" ]; then
+            echo "FAIL: timestamp is empty"
+            exit 1
+          fi
+          if [ "${{ steps.gen.outputs.message }}" != "hello from step 1" ]; then
+            echo "FAIL: message mismatch"
+            exit 1
+          fi
+          echo "Step outputs work!"
+
+      - name: Multiline output
+        id: multi
+        run: |
+          echo "lines<<EOF" >> $GITHUB_OUTPUT
+          echo "line 1" >> $GITHUB_OUTPUT
+          echo "line 2" >> $GITHUB_OUTPUT
+          echo "line 3" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Check multiline
+        run: |
+          LINES="${{ steps.multi.outputs.lines }}"
+          echo "Got multiline output: $LINES"
+          if [ -z "$LINES" ]; then
+            echo "FAIL: multiline output is empty"
+            exit 1
+          fi
+          echo "Multiline outputs work!"

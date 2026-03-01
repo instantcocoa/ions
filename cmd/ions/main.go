@@ -1,0 +1,336 @@
+package main
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"os/signal"
+	"sort"
+	"strings"
+
+	"github.com/fatih/color"
+	"github.com/spf13/cobra"
+
+	"github.com/emaland/ions/internal/graph"
+	"github.com/emaland/ions/internal/orchestrator"
+	"github.com/emaland/ions/internal/runner"
+	"github.com/emaland/ions/internal/workflow"
+)
+
+var verbose bool
+
+func main() {
+	root := &cobra.Command{
+		Use:   "ions",
+		Short: "Local GitHub Actions runner with high-fidelity execution",
+	}
+
+	root.PersistentFlags().BoolVarP(&verbose, "verbose", "v", false, "verbose output")
+
+	root.AddCommand(validateCmd())
+	root.AddCommand(listCmd())
+	root.AddCommand(runCmd())
+	root.AddCommand(runnerCmd())
+	root.AddCommand(cleanCmd())
+
+	if err := root.Execute(); err != nil {
+		os.Exit(1)
+	}
+}
+
+func validateCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "validate <workflow-file>",
+		Short: "Validate a workflow YAML file",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			w, err := workflow.ParseFile(args[0])
+			if err != nil {
+				return fmt.Errorf("parse error: %w", err)
+			}
+
+			errs := workflow.Validate(w)
+			if len(errs) == 0 {
+				green := color.New(color.FgGreen)
+				green.Printf("✓")
+				fmt.Printf(" %s is valid\n", args[0])
+				if verbose {
+					fmt.Printf("  name: %s\n", w.Name)
+					fmt.Printf("  jobs: %d\n", len(w.Jobs))
+				}
+				return nil
+			}
+
+			red := color.New(color.FgRed)
+			red.Printf("✗")
+			fmt.Printf(" %s has %d validation error(s):\n", args[0], len(errs))
+			for _, e := range errs {
+				fmt.Printf("  - %s\n", e)
+			}
+			return fmt.Errorf("validation failed")
+		},
+	}
+}
+
+func listCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "list <workflow-file>",
+		Short: "List jobs in a workflow",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			w, err := workflow.ParseFile(args[0])
+			if err != nil {
+				return fmt.Errorf("parse error: %w", err)
+			}
+
+			errs := workflow.Validate(w)
+			if len(errs) > 0 {
+				red := color.New(color.FgRed)
+				red.Printf("✗")
+				fmt.Printf(" workflow has validation errors:\n")
+				for _, e := range errs {
+					fmt.Printf("  - %s\n", e)
+				}
+				return fmt.Errorf("validation failed")
+			}
+
+			bold := color.New(color.Bold)
+			bold.Printf("Workflow: %s\n", w.Name)
+			fmt.Println()
+
+			g, err := graph.Build(w)
+			if err != nil {
+				return fmt.Errorf("graph error: %w", err)
+			}
+
+			if err := g.Validate(); err != nil {
+				return fmt.Errorf("graph error: %w", err)
+			}
+
+			groups, err := g.ParallelGroups()
+			if err != nil {
+				return fmt.Errorf("graph error: %w", err)
+			}
+
+			cyan := color.New(color.FgCyan)
+			yellow := color.New(color.FgYellow)
+			dim := color.New(color.Faint)
+
+			for i, group := range groups {
+				cyan.Printf("Stage %d", i+1)
+				fmt.Printf(" (%d job(s)):\n", len(group.Nodes))
+				for _, node := range group.Nodes {
+					fmt.Printf("  ")
+					bold.Printf("%s", node.NodeID)
+					if node.JobName != node.NodeID && node.JobName != node.JobID {
+						dim.Printf(" (%s)", node.JobName)
+					}
+					fmt.Println()
+
+					if verbose {
+						job := node.Job
+						if len(job.RunsOn.Labels) > 0 {
+							fmt.Printf("    runs-on: %s\n", strings.Join(job.RunsOn.Labels, ", "))
+						}
+						if len(node.DependsOn) > 0 {
+							fmt.Printf("    needs: %s\n", strings.Join(node.DependsOn, ", "))
+						}
+						if job.If != "" {
+							yellow.Printf("    if: %s\n", job.If)
+						}
+						if node.MatrixValues != nil {
+							keys := make([]string, 0, len(node.MatrixValues))
+							for k := range node.MatrixValues {
+								keys = append(keys, k)
+							}
+							sort.Strings(keys)
+							parts := make([]string, len(keys))
+							for j, k := range keys {
+								parts[j] = fmt.Sprintf("%s=%v", k, node.MatrixValues[k])
+							}
+							fmt.Printf("    matrix: %s\n", strings.Join(parts, ", "))
+						}
+						if len(job.Steps) > 0 {
+							fmt.Printf("    steps: %d\n", len(job.Steps))
+						}
+						if job.Uses != "" {
+							fmt.Printf("    uses: %s\n", job.Uses)
+						}
+					}
+				}
+			}
+
+			// Summary
+			fmt.Println()
+			totalNodes := 0
+			for _, group := range groups {
+				totalNodes += len(group.Nodes)
+			}
+			dim.Printf("Total: %d job(s) in %d stage(s)\n", totalNodes, len(groups))
+			return nil
+		},
+	}
+}
+
+func runCmd() *cobra.Command {
+	var (
+		jobFilter       string
+		eventName       string
+		secrets         []string
+		vars            []string
+		envVars         []string
+		inputs          []string
+		dryRun          bool
+		artifactDir     string
+		reuseContainers bool
+		platform        string
+	)
+
+	cmd := &cobra.Command{
+		Use:   "run [workflow-file]",
+		Short: "Run a workflow locally",
+		Args:  cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			workflowPath := ".github/workflows/ci.yml"
+			if len(args) > 0 {
+				workflowPath = args[0]
+			}
+
+			ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
+			defer cancel()
+
+			opts := orchestrator.Options{
+				WorkflowPath:    workflowPath,
+				JobFilter:       jobFilter,
+				EventName:       eventName,
+				Secrets:         parseKeyValues(secrets),
+				Vars:            parseKeyValues(vars),
+				Env:             parseKeyValues(envVars),
+				Inputs:          parseKeyValues(inputs),
+				DryRun:          dryRun,
+				Verbose:         verbose,
+				ArtifactDir:     artifactDir,
+				ReuseContainers: reuseContainers,
+				Platform:        platform,
+			}
+
+			o, err := orchestrator.New(opts)
+			if err != nil {
+				return err
+			}
+
+			result, err := o.Run(ctx)
+			if err != nil {
+				return err
+			}
+
+			if !result.Success {
+				return fmt.Errorf("workflow failed")
+			}
+			return nil
+		},
+	}
+
+	cmd.Flags().StringVar(&jobFilter, "job", "", "run only this job")
+	cmd.Flags().StringVar(&eventName, "event", "push", "event name")
+	cmd.Flags().StringSliceVar(&secrets, "secret", nil, "secret KEY=VALUE (repeatable)")
+	cmd.Flags().StringSliceVar(&vars, "var", nil, "variable KEY=VALUE (repeatable)")
+	cmd.Flags().StringSliceVar(&envVars, "env", nil, "environment KEY=VALUE (repeatable)")
+	cmd.Flags().StringSliceVar(&inputs, "input", nil, "input KEY=VALUE (repeatable)")
+	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "print execution plan without running")
+	cmd.Flags().StringVar(&artifactDir, "artifact-dir", "", "override artifact storage location")
+	cmd.Flags().BoolVar(&reuseContainers, "reuse-containers", false, "don't remove containers after run (debugging)")
+	cmd.Flags().StringVar(&platform, "platform", "", "override platform detection (e.g. linux/amd64)")
+
+	return cmd
+}
+
+func runnerCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "runner",
+		Short: "Manage the GitHub Actions runner binary",
+	}
+
+	var version string
+	installCmd := &cobra.Command{
+		Use:   "install",
+		Short: "Install or update the runner binary",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			mgr, err := runner.NewManager()
+			if err != nil {
+				return err
+			}
+
+			ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
+			defer cancel()
+
+			if version == "" {
+				fmt.Println("Checking for latest runner version...")
+				v, err := mgr.LatestVersion(ctx)
+				if err != nil {
+					return err
+				}
+				version = v
+			}
+
+			fmt.Printf("Installing runner v%s...\n", version)
+			if err := mgr.Install(ctx, version); err != nil {
+				return err
+			}
+
+			green := color.New(color.FgGreen)
+			green.Printf("✓")
+			fmt.Printf(" Runner v%s installed to %s\n", version, mgr.VersionDir(version))
+			return nil
+		},
+	}
+	installCmd.Flags().StringVar(&version, "version", "", "specific version to install (default: latest)")
+	cmd.AddCommand(installCmd)
+
+	return cmd
+}
+
+func cleanCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "clean",
+		Short: "Remove runner caches and work directories",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			mgr, err := runner.NewManager()
+			if err != nil {
+				return err
+			}
+
+			removed, err := mgr.Clean()
+			if err != nil {
+				return err
+			}
+
+			if len(removed) == 0 {
+				fmt.Println("Nothing to clean.")
+				return nil
+			}
+
+			green := color.New(color.FgGreen)
+			for _, dir := range removed {
+				green.Printf("✓")
+				fmt.Printf(" Removed %s\n", dir)
+			}
+			return nil
+		},
+	}
+}
+
+// parseKeyValues converts ["KEY=VALUE", ...] to map[string]string.
+func parseKeyValues(kvs []string) map[string]string {
+	if len(kvs) == 0 {
+		return nil
+	}
+	m := make(map[string]string, len(kvs))
+	for _, kv := range kvs {
+		k, v, ok := strings.Cut(kv, "=")
+		if ok {
+			m[k] = v
+		}
+	}
+	return m
+}

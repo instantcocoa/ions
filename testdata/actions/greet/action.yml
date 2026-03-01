@@ -1,0 +1,21 @@
+name: 'Greet'
+description: 'A simple composite action for testing'
+inputs:
+  name:
+    description: 'Who to greet'
+    default: 'World'
+outputs:
+  greeting:
+    description: 'The greeting message'
+    value: ${{ steps.greet.outputs.greeting }}
+runs:
+  using: 'composite'
+  steps:
+    - id: greet
+      run: |
+        MSG="Hello, ${{ inputs.name }}!"
+        echo "$MSG"
+        echo "greeting=$MSG" >> "$GITHUB_OUTPUT"
+      shell: bash
+    - run: echo "Composite action completed successfully"
+      shell: bash

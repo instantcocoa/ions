@@ -1,0 +1,20 @@
+name: Composite Action Test
+on: push
+jobs:
+  test-composite:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Use local composite action with default input
+        uses: ./testdata/actions/greet
+        id: greet-default
+
+      - name: Use local composite action with custom input
+        uses: ./testdata/actions/greet
+        with:
+          name: 'ions'
+        id: greet-custom
+
+      - name: Verify outputs
+        run: |
+          echo "Default greeting: ${{ steps.greet-default.outputs.greeting }}"
+          echo "Custom greeting: ${{ steps.greet-custom.outputs.greeting }}"

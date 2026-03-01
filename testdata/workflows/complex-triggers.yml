@@ -1,0 +1,44 @@
+name: Complex Triggers
+on:
+  push:
+    branches:
+      - main
+      - 'release/**'
+    tags:
+      - 'v*'
+    paths-ignore:
+      - '**.md'
+  pull_request:
+    types: [opened, synchronize, reopened]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Target environment'
+        required: true
+        default: 'staging'
+        type: choice
+        options:
+          - staging
+          - production
+      debug:
+        description: 'Enable debug mode'
+        type: boolean
+        default: false
+  schedule:
+    - cron: '0 2 * * 1'
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - run: echo "checking"

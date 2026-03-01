@@ -1,0 +1,38 @@
+name: Cache Test
+on: push
+
+jobs:
+  cache-save:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create cached data
+        run: |
+          mkdir -p test-cache-dir
+          echo "cached-content-$(date +%s)" > test-cache-dir/data.txt
+          cat test-cache-dir/data.txt
+
+      - name: Cache the directory
+        uses: actions/cache/save@v4
+        with:
+          path: test-cache-dir
+          key: test-cache-${{ github.run_id }}
+
+  cache-restore:
+    runs-on: ubuntu-latest
+    needs: cache-save
+    steps:
+      - name: Restore cache
+        uses: actions/cache/restore@v4
+        with:
+          path: test-cache-dir
+          key: test-cache-${{ github.run_id }}
+
+      - name: Verify cache
+        run: |
+          if [ -f test-cache-dir/data.txt ]; then
+            echo "Cache restored successfully!"
+            cat test-cache-dir/data.txt
+          else
+            echo "Cache restore failed!"
+            exit 1
+          fi

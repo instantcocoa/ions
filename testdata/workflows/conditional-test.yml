@@ -1,0 +1,40 @@
+name: Conditional Steps Test
+on: push
+
+env:
+  FEATURE_FLAG: "true"
+
+jobs:
+  test-conditions:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Always runs
+        run: echo "This always runs"
+
+      - name: Conditional on env
+        if: env.FEATURE_FLAG == 'true'
+        run: echo "Feature is enabled"
+
+      - name: Skip this
+        if: env.FEATURE_FLAG == 'false'
+        run: |
+          echo "This should be skipped"
+          exit 1
+
+      - name: Check step outcome
+        id: might-fail
+        run: echo "This step succeeds"
+        continue-on-error: true
+
+      - name: Check previous step
+        if: steps.might-fail.outcome == 'success'
+        run: echo "Previous step succeeded as expected"
+
+  skipped-job:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch'
+    steps:
+      - name: Should not run
+        run: |
+          echo "This job should be skipped"
+          exit 1

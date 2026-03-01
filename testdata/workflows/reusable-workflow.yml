@@ -1,0 +1,15 @@
+name: Reusable Caller
+on: push
+
+jobs:
+  call-reusable:
+    uses: octo-org/example-repo/.github/workflows/reusable.yml@main
+    with:
+      environment: production
+    secrets: inherit
+
+  after-reusable:
+    needs: call-reusable
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "After reusable workflow"

@@ -1,0 +1,41 @@
+name: Multi Job
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  GLOBAL_VAR: global-value
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      artifact-path:
+        value: ${{ steps.build-step.outputs.path }}
+    env:
+      BUILD_ENV: production
+    steps:
+      - name: Build
+        id: build-step
+        run: |
+          echo "Building..."
+          echo "path=dist/app" >> $GITHUB_OUTPUT
+
+  test:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run tests
+        run: echo "Testing..."
+
+  deploy:
+    needs: [build, test]
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    environment:
+      name: production
+      url: https://example.com
+    steps:
+      - name: Deploy
+        run: echo "Deploying..."

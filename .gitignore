@@ -1,0 +1,20 @@
+# Build output
+/ions
+
+# Runtime work directories
+.ions-work/
+
+# macOS
+.DS_Store
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Test binaries (Go)
+*.test.exe
+
+# Coverage
+coverage.out

@@ -1,0 +1,34 @@
+name: Env Expression Test
+on: push
+
+env:
+  MY_VERSION: "3.14.0"
+  GREETING: hello-world
+
+jobs:
+  test-env:
+    runs-on: ubuntu-latest
+    env:
+      JOB_VAR: from-job
+    steps:
+      - name: Check workflow env
+        run: |
+          echo "MY_VERSION=$MY_VERSION"
+          echo "GREETING=$GREETING"
+          echo "JOB_VAR=$JOB_VAR"
+          if [ "$MY_VERSION" != "3.14.0" ]; then echo "FAIL: MY_VERSION wrong" && exit 1; fi
+          if [ "$GREETING" != "hello-world" ]; then echo "FAIL: GREETING wrong" && exit 1; fi
+          if [ "$JOB_VAR" != "from-job" ]; then echo "FAIL: JOB_VAR wrong" && exit 1; fi
+          echo "All env vars correct!"
+
+      - name: Use env in step-level env
+        env:
+          COMBINED: "${{ env.GREETING }}-${{ env.MY_VERSION }}"
+        run: |
+          echo "COMBINED=$COMBINED"
+          if [ "$COMBINED" != "hello-world-3.14.0" ]; then echo "FAIL: COMBINED wrong: $COMBINED" && exit 1; fi
+          echo "Step env expression works!"
+
+      - name: Use env in run expression
+        run: |
+          echo "Version is ${{ env.MY_VERSION }}"

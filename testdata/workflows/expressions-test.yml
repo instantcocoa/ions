@@ -1,0 +1,48 @@
+name: Expressions Test
+on: push
+
+env:
+  APP_NAME: my-cool-app
+  VERSION: "2.0.0"
+
+jobs:
+  test-expressions:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        tier: [free, pro]
+    steps:
+      - name: Test string functions
+        run: |
+          echo "Testing expression functions..."
+          # These are evaluated server-side (in the run: script)
+
+      - name: Test contains
+        if: contains('hello world', 'world')
+        run: echo "contains() works"
+
+      - name: Test startsWith
+        if: startsWith('hello world', 'hello')
+        run: echo "startsWith() works"
+
+      - name: Test endsWith
+        if: endsWith('hello world', 'world')
+        run: echo "endsWith() works"
+
+      - name: Test format in env
+        env:
+          FULL_NAME: "${{ format('{0}-{1}', env.APP_NAME, env.VERSION) }}"
+          TIER: "${{ matrix.tier }}"
+        run: |
+          echo "FULL_NAME=$FULL_NAME"
+          echo "TIER=$TIER"
+          if [ "$FULL_NAME" != "my-cool-app-2.0.0" ]; then
+            echo "FAIL: format() didn't work: $FULL_NAME"
+            exit 1
+          fi
+          echo "format() expression works!"
+
+      - name: Test toJSON
+        run: |
+          echo "Matrix tier: ${{ matrix.tier }}"
+          echo "Runner OS: ${{ runner.os }}"

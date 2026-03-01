@@ -1,0 +1,31 @@
+name: Job Outputs Test
+on: push
+
+jobs:
+  producer:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.set-version.outputs.version }}
+      sha: ${{ steps.set-sha.outputs.sha }}
+    steps:
+      - name: Set version output
+        id: set-version
+        run: echo "version=1.2.3" >> $GITHUB_OUTPUT
+
+      - name: Set SHA output
+        id: set-sha
+        run: echo "sha=$(echo test | shasum | cut -d' ' -f1)" >> $GITHUB_OUTPUT
+
+  consumer:
+    needs: producer
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check outputs
+        run: |
+          echo "Version: ${{ needs.producer.outputs.version }}"
+          echo "SHA: ${{ needs.producer.outputs.sha }}"
+          if [ "${{ needs.producer.outputs.version }}" != "1.2.3" ]; then
+            echo "FAIL: version mismatch"
+            exit 1
+          fi
+          echo "Outputs passed correctly!"

@@ -1,0 +1,14 @@
+name: Setup Node Simple
+on: push
+
+jobs:
+  test:
+    runs-on: macos-latest
+    steps:
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Verify
+        run: |
+          echo "Node version: $(node --version)"

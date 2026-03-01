@@ -1,0 +1,41 @@
+name: Service Containers
+on: push
+
+jobs:
+  integration:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+
+    container:
+      image: node:20
+      env:
+        DATABASE_URL: postgres://postgres:postgres@postgres:5432/test
+
+    defaults:
+      run:
+        shell: bash
+        working-directory: ./src
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Run tests
+        run: npm test
+        env:
+          REDIS_URL: redis://redis:6379

@@ -1,0 +1,39 @@
+name: Multi Job Simple
+on: push
+
+env:
+  GLOBAL_VAR: ions-test
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Set version
+        id: version
+        run: echo "version=1.2.3" >> "$GITHUB_OUTPUT"
+      - name: Build artifact
+        run: |
+          echo "Building artifact"
+          echo "Global: $GLOBAL_VAR"
+
+  test:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run tests
+        run: |
+          echo "Testing version ${{ needs.build.outputs.version }}"
+          echo "Test passed"
+
+  deploy:
+    needs: [build, test]
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Deploy
+        run: |
+          echo "Build result: ${{ needs.build.result }}"
+          echo "Test result: ${{ needs.test.result }}"
+          echo "Done"

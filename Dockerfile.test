@@ -1,0 +1,39 @@
+FROM golang:1.25-bookworm
+
+# Install Docker
+RUN install -m 0755 -d /etc/apt/keyrings && \
+    curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc && \
+    chmod a+r /etc/apt/keyrings/docker.asc && \
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian bookworm stable" \
+      > /etc/apt/sources.list.d/docker.list && \
+    apt-get update && \
+    apt-get install -y docker-ce docker-ce-cli containerd.io && \
+    rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN go build -buildvcs=false -o ions ./cmd/ions/
+
+# Entrypoint: start Docker daemon, wait for it, then run the test command
+COPY <<'SCRIPT' /entrypoint.sh
+#!/bin/bash
+set -e
+# Start Docker daemon in the background
+dockerd --storage-driver=vfs >/var/log/dockerd.log 2>&1 &
+# Wait for Docker to be ready
+for i in $(seq 1 30); do
+    if docker info >/dev/null 2>&1; then
+        echo "Docker daemon is ready"
+        break
+    fi
+    sleep 1
+done
+# Run whatever command was passed
+exec "$@"
+SCRIPT
+RUN chmod +x /entrypoint.sh
+
+ENTRYPOINT ["/entrypoint.sh"]
+CMD ["bash"]
