@@ -1,0 +1,40 @@
+name: GitHub API Test
+on: push
+
+jobs:
+  api-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check API URL is set
+        run: |
+          echo "API URL: $GITHUB_API_URL"
+          echo "Token length: ${#GITHUB_TOKEN}"
+          if [ -z "$GITHUB_API_URL" ]; then
+            echo "ERROR: GITHUB_API_URL is not set"
+            exit 1
+          fi
+
+      - name: Fetch repository info
+        run: |
+          echo "Fetching repo info from stub..."
+          curl -sf -H "Authorization: Bearer $GITHUB_TOKEN" \
+            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY" | head -20
+          echo "Repository info retrieved successfully"
+
+      - name: Create commit status
+        run: |
+          curl -sf -X POST \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H "Content-Type: application/json" \
+            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/statuses/$GITHUB_SHA" \
+            -d '{"state":"success","context":"ions/test","description":"Local test passed"}'
+          echo "Status created successfully"
+
+      - name: Post a comment
+        run: |
+          curl -sf -X POST \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H "Content-Type: application/json" \
+            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/issues/1/comments" \
+            -d '{"body":"This comment was posted by the ions GitHub API stub"}'
+          echo "Comment posted successfully"

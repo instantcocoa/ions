@@ -31,12 +31,13 @@ type Process struct {
 	brokerURL string
 	name      string
 
-	cmd     *exec.Cmd
-	stdout  io.ReadCloser
-	stderr  io.ReadCloser
-	done    chan error
-	exited  bool
-	mu      sync.Mutex
+	cmd          *exec.Cmd
+	stdout       io.ReadCloser
+	stderr       io.ReadCloser
+	done         chan error
+	exited       bool
+	configLocked bool // true while we hold configMu
+	mu           sync.Mutex
 }
 
 // NewProcess creates a new runner process manager from the given config.
@@ -74,6 +75,9 @@ var configMu sync.Mutex
 // is held until the runner process has started and loaded its config.
 func (p *Process) Configure(ctx context.Context) error {
 	configMu.Lock()
+	p.mu.Lock()
+	p.configLocked = true
+	p.mu.Unlock()
 	// Lock is released in Start() after the runner process has launched.
 
 	// .runner — main config telling the runner where to connect.
@@ -141,7 +145,12 @@ func (p *Process) Start(ctx context.Context) error {
 	defer func() {
 		go func() {
 			time.Sleep(2 * time.Second)
-			configMu.Unlock()
+			p.mu.Lock()
+			if p.configLocked {
+				p.configLocked = false
+				configMu.Unlock()
+			}
+			p.mu.Unlock()
 		}()
 	}()
 

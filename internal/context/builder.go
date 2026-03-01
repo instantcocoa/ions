@@ -54,6 +54,14 @@ type BuilderOptions struct {
 	JobResults map[string]*JobResult
 	// Which jobs this job depends on
 	JobNeeds []string
+
+	// APIBaseURL overrides the default https://api.github.com for the
+	// github.api_url and github.graphql_url context fields.
+	// Set by the orchestrator to route API calls through the local stub.
+	APIBaseURL string
+
+	// GitHubToken overrides the default dummy token in github.token.
+	GitHubToken string
 }
 
 // Builder constructs expression contexts.

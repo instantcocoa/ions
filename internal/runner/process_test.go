@@ -74,6 +74,9 @@ func TestConfigureWritesFiles(t *testing.T) {
 
 	err = p.Configure(context.Background())
 	require.NoError(t, err)
+	// Configure holds configMu — release it since we won't call Start.
+	p.configLocked = false
+	configMu.Unlock()
 
 	// Verify .runner file was created.
 	_, err = os.Stat(filepath.Join(dir, ".runner"))
@@ -117,13 +120,16 @@ func TestStartDoubleStart(t *testing.T) {
 	dir := t.TempDir()
 	// Create a fake run.sh that sleeps.
 	runScript := filepath.Join(dir, "run.sh")
-	err := os.WriteFile(runScript, []byte("#!/bin/bash\nsleep 60"), 0o755)
+	err := os.WriteFile(runScript, []byte("#!/usr/bin/env bash\nsleep 60"), 0o755)
 	require.NoError(t, err)
 
 	p, err := NewProcess(ProcessConfig{
 		RunnerDir: dir,
 		BrokerURL: "http://localhost:8080",
 	})
+	require.NoError(t, err)
+
+	err = p.Configure(context.Background())
 	require.NoError(t, err)
 
 	err = p.Start(context.Background())
@@ -139,13 +145,16 @@ func TestStartAndStop(t *testing.T) {
 	dir := t.TempDir()
 	// Create a fake run.sh that sleeps but handles signals.
 	runScript := filepath.Join(dir, "run.sh")
-	err := os.WriteFile(runScript, []byte("#!/bin/bash\nexec sleep 60"), 0o755)
+	err := os.WriteFile(runScript, []byte("#!/usr/bin/env bash\nexec sleep 60"), 0o755)
 	require.NoError(t, err)
 
 	p, err := NewProcess(ProcessConfig{
 		RunnerDir: dir,
 		BrokerURL: "http://localhost:8080",
 	})
+	require.NoError(t, err)
+
+	err = p.Configure(context.Background())
 	require.NoError(t, err)
 
 	err = p.Start(context.Background())
@@ -180,13 +189,16 @@ func TestStartFallbackToListener(t *testing.T) {
 	binDir := filepath.Join(dir, "bin")
 	require.NoError(t, os.MkdirAll(binDir, 0o755))
 	listener := filepath.Join(binDir, "Runner.Listener")
-	err := os.WriteFile(listener, []byte("#!/bin/bash\nsleep 60"), 0o755)
+	err := os.WriteFile(listener, []byte("#!/usr/bin/env bash\nsleep 60"), 0o755)
 	require.NoError(t, err)
 
 	p, err := NewProcess(ProcessConfig{
 		RunnerDir: dir,
 		BrokerURL: "http://localhost:8080",
 	})
+	require.NoError(t, err)
+
+	err = p.Configure(context.Background())
 	require.NoError(t, err)
 
 	err = p.Start(context.Background())
@@ -212,13 +224,16 @@ func TestStopProcessThatExitsQuickly(t *testing.T) {
 	dir := t.TempDir()
 	// Create a run.sh that exits immediately.
 	runScript := filepath.Join(dir, "run.sh")
-	err := os.WriteFile(runScript, []byte("#!/bin/bash\nexit 0"), 0o755)
+	err := os.WriteFile(runScript, []byte("#!/usr/bin/env bash\nexit 0"), 0o755)
 	require.NoError(t, err)
 
 	p, err := NewProcess(ProcessConfig{
 		RunnerDir: dir,
 		BrokerURL: "http://localhost:8080",
 	})
+	require.NoError(t, err)
+
+	err = p.Configure(context.Background())
 	require.NoError(t, err)
 
 	err = p.Start(context.Background())
@@ -242,13 +257,16 @@ func TestStopKillsHangingProcess(t *testing.T) {
 	dir := t.TempDir()
 	// Script that traps SIGINT and ignores it.
 	runScript := filepath.Join(dir, "run.sh")
-	err := os.WriteFile(runScript, []byte("#!/bin/bash\ntrap '' INT\nsleep 300"), 0o755)
+	err := os.WriteFile(runScript, []byte("#!/usr/bin/env bash\ntrap '' INT\nsleep 300"), 0o755)
 	require.NoError(t, err)
 
 	p, err := NewProcess(ProcessConfig{
 		RunnerDir: dir,
 		BrokerURL: "http://localhost:8080",
 	})
+	require.NoError(t, err)
+
+	err = p.Configure(context.Background())
 	require.NoError(t, err)
 
 	err = p.Start(context.Background())

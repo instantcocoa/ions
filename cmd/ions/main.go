@@ -184,6 +184,7 @@ func runCmd() *cobra.Command {
 		artifactDir     string
 		reuseContainers bool
 		platform        string
+		githubToken     string
 	)
 
 	cmd := &cobra.Command{
@@ -212,6 +213,7 @@ func runCmd() *cobra.Command {
 				ArtifactDir:     artifactDir,
 				ReuseContainers: reuseContainers,
 				Platform:        platform,
+				GitHubToken:     githubToken,
 			}
 
 			o, err := orchestrator.New(opts)
@@ -241,6 +243,7 @@ func runCmd() *cobra.Command {
 	cmd.Flags().StringVar(&artifactDir, "artifact-dir", "", "override artifact storage location")
 	cmd.Flags().BoolVar(&reuseContainers, "reuse-containers", false, "don't remove containers after run (debugging)")
 	cmd.Flags().StringVar(&platform, "platform", "", "override platform detection (e.g. linux/amd64)")
+	cmd.Flags().StringVar(&githubToken, "github-token", "", "GitHub token for API passthrough (optional)")
 
 	return cmd
 }

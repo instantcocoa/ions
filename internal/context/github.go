@@ -74,10 +74,10 @@ func GitHubContext(opts BuilderOptions) expression.Value {
 		"workspace":         expression.String(workspace),
 		"action":            expression.String(""),
 		"server_url":        expression.String("https://github.com"),
-		"api_url":           expression.String("https://api.github.com"),
-		"graphql_url":       expression.String("https://api.github.com/graphql"),
+		"api_url":           expression.String(apiURL(opts)),
+		"graphql_url":       expression.String(graphqlURL(opts)),
 		"event":             expression.Object(map[string]expression.Value{}),
-		"token":             expression.String("ions-dummy-token"),
+		"token":             expression.String(tokenValue(opts)),
 		"job":               expression.String(""),
 		"action_path":       expression.String(""),
 		"action_ref":        expression.String(""),
@@ -165,4 +165,28 @@ func readGitRef(repo *git.Repository) (ref, sha, refName string) {
 	}
 
 	return ref, sha, refName
+}
+
+// apiURL returns the GitHub API URL to use in the context.
+func apiURL(opts BuilderOptions) string {
+	if opts.APIBaseURL != "" {
+		return opts.APIBaseURL
+	}
+	return "https://api.github.com"
+}
+
+// graphqlURL returns the GraphQL URL to use in the context.
+func graphqlURL(opts BuilderOptions) string {
+	if opts.APIBaseURL != "" {
+		return strings.TrimRight(opts.APIBaseURL, "/") + "/graphql"
+	}
+	return "https://api.github.com/graphql"
+}
+
+// tokenValue returns the GitHub token to use in the context.
+func tokenValue(opts BuilderOptions) string {
+	if opts.GitHubToken != "" {
+		return opts.GitHubToken
+	}
+	return "ions-dummy-token"
 }

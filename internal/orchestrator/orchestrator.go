@@ -19,6 +19,7 @@ import (
 	ionsctx "github.com/emaland/ions/internal/context"
 	"github.com/emaland/ions/internal/docker"
 	"github.com/emaland/ions/internal/expression"
+	"github.com/emaland/ions/internal/githubstub"
 	"github.com/emaland/ions/internal/graph"
 	"github.com/emaland/ions/internal/runner"
 	"github.com/emaland/ions/internal/workflow"
@@ -39,6 +40,7 @@ type Options struct {
 	ArtifactDir     string
 	ReuseContainers bool
 	Platform        string
+	GitHubToken     string
 }
 
 // RunResult captures the outcome of the full orchestrated run.
@@ -175,6 +177,15 @@ func (o *Orchestrator) Run(ctx context.Context) (*RunResult, error) {
 		return nil, fmt.Errorf("artifact server: %w", err)
 	}
 	brokerSrv.RegisterRoutes(artifactSrv)
+
+	// Register GitHub API stub on the broker.
+	repoInfo := repoInfoFromContext(initialCtx, o.opts.RepoPath)
+	stubSrv := githubstub.NewServer(repoInfo, brokerSrv.URL(), githubstub.Options{
+		Token:   o.opts.GitHubToken,
+		Verbose: o.opts.Verbose,
+		Vars:    o.opts.Vars,
+	})
+	brokerSrv.RegisterRoutes(stubSrv)
 
 	if err := brokerSrv.Start(ctx); err != nil {
 		return nil, fmt.Errorf("broker start: %w", err)
@@ -469,6 +480,12 @@ func (o *Orchestrator) buildContext(
 		Inputs:       o.opts.Inputs,
 		StepResults:  stepResults,
 		JobResults:   jobOutputs,
+		GitHubToken:  o.opts.GitHubToken,
+	}
+
+	// If the broker is running, route API calls through it.
+	if o.broker != nil {
+		opts.APIBaseURL = o.broker.URL() + "/api/v3"
 	}
 
 	if node != nil {
@@ -636,6 +653,40 @@ func copyDir(src, dst string) error {
 		}
 		return copyFile(path, target)
 	})
+}
+
+// repoInfoFromContext extracts repo info from the initial expression context
+// for use by the GitHub API stub.
+func repoInfoFromContext(ctx expression.MapContext, repoPath string) githubstub.RepoInfo {
+	info := githubstub.RepoInfo{RepoPath: repoPath}
+
+	if ghCtx, ok := ctx["github"]; ok {
+		if fields := ghCtx.ObjectFields(); fields != nil {
+			if v, ok := fields["repository"]; ok {
+				parts := strings.SplitN(v.StringVal(), "/", 2)
+				if len(parts) == 2 {
+					info.Owner = parts[0]
+					info.Repo = parts[1]
+				}
+			}
+			if v, ok := fields["ref"]; ok {
+				info.CurrentRef = v.StringVal()
+			}
+			if v, ok := fields["sha"]; ok {
+				info.CurrentSHA = v.StringVal()
+			}
+			if v, ok := fields["ref_name"]; ok {
+				info.DefaultBranch = v.StringVal()
+			}
+			if v, ok := fields["server_url"]; ok {
+				if info.Owner != "" && info.Repo != "" {
+					info.CloneURL = v.StringVal() + "/" + info.Owner + "/" + info.Repo + ".git"
+				}
+			}
+		}
+	}
+
+	return info
 }
 
 func copyFile(src, dst string) error {
