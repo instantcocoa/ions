@@ -1,0 +1,15 @@
+name: Timeout Test
+
+on: push
+
+jobs:
+  quick-job:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - run: echo "This job has a 5 minute timeout"
+
+  default-timeout:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "This job uses the default 360 minute timeout"

@@ -21,6 +21,7 @@ func GitHubContext(opts BuilderOptions) expression.Value {
 	ref := ""
 	sha := ""
 	refName := ""
+	hasRemote := false
 
 	if opts.RepoPath != "" {
 		repo, err := git.PlainOpenWithOptions(opts.RepoPath, &git.PlainOpenOptions{
@@ -28,7 +29,9 @@ func GitHubContext(opts BuilderOptions) expression.Value {
 		})
 		if err == nil {
 			actor = readGitActor(repo, actor)
+			prevRepo := repository
 			repository, repositoryOwner = readGitRepository(repo, repository, repositoryOwner)
+			hasRemote = repository != prevRepo
 			ref, sha, refName = readGitRef(repo)
 		}
 	}
@@ -58,6 +61,17 @@ func GitHubContext(opts BuilderOptions) expression.Value {
 
 	workspace, _ := os.Getwd()
 
+	// When there's no git remote, point server_url at the broker so
+	// that actions/checkout hits our local stub instead of trying to
+	// clone from https://github.com/local/repo (which doesn't exist).
+	// The workspace is pre-populated with repo files, so checkout
+	// failures are non-fatal for most workflows.
+	serverURL := "https://github.com"
+	if !hasRemote && opts.APIBaseURL != "" {
+		// Strip /api/v3 suffix to get the base broker URL.
+		serverURL = strings.TrimSuffix(opts.APIBaseURL, "/api/v3")
+	}
+
 	fields := map[string]expression.Value{
 		"event_name":        expression.String(eventName),
 		"workflow":          expression.String(opts.WorkflowName),
@@ -73,7 +87,7 @@ func GitHubContext(opts BuilderOptions) expression.Value {
 		"ref_name":          expression.String(refName),
 		"workspace":         expression.String(workspace),
 		"action":            expression.String(""),
-		"server_url":        expression.String("https://github.com"),
+		"server_url":        expression.String(serverURL),
 		"api_url":           expression.String(apiURL(opts)),
 		"graphql_url":       expression.String(graphqlURL(opts)),
 		"event":             expression.Object(map[string]expression.Value{}),

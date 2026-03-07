@@ -19,6 +19,15 @@ import (
 // requestIDCounter generates unique request IDs across all jobs.
 var requestIDCounter atomic.Int64
 
+// JobMessageOptions configures job message construction.
+type JobMessageOptions struct {
+	// UseRunnerContainers delegates container management to the runner.
+	// When true, JobContainer and JobServiceContainers are set in the
+	// message and the runner handles Docker orchestration natively.
+	// This only works on Linux.
+	UseRunnerContainers bool
+}
+
 // BuildJobMessage constructs an AgentJobRequestMessage from a job node and context.
 func BuildJobMessage(
 	node *graph.JobNode,
@@ -27,6 +36,7 @@ func BuildJobMessage(
 	brokerURL string,
 	runID string,
 	secrets map[string]string,
+	opts ...JobMessageOptions,
 ) (*AgentJobRequestMessage, error) {
 	jobID := uuid.New().String()
 	planID := uuid.New().String()
@@ -82,11 +92,25 @@ func BuildJobMessage(
 		}
 	}
 
-	// Note: We intentionally do NOT set JobContainer or JobServiceContainers here.
-	// The runner's built-in container support is Linux-only. Instead, ions manages
-	// Docker service containers itself in the orchestrator (before the runner starts)
-	// and job containers are deferred to a future implementation.
-	// Services are accessible via localhost — the runner doesn't need to know about them.
+	// Container support: when UseRunnerContainers is set, delegate container
+	// management to the runner. The runner creates Docker containers, networks,
+	// and runs steps inside the job container natively. This is how GitHub's
+	// hosted runners work and only functions on Linux.
+	var useRunnerContainers bool
+	for _, o := range opts {
+		if o.UseRunnerContainers {
+			useRunnerContainers = true
+		}
+	}
+
+	if useRunnerContainers {
+		if job.Container != nil {
+			msg.JobContainer = containerToTemplateToken(job.Container)
+		}
+		if len(job.Services) > 0 {
+			msg.JobServiceContainers = serviceContainersToTemplateToken(job.Services)
+		}
+	}
 
 	return msg, nil
 }
@@ -392,6 +416,15 @@ func containerToTemplateToken(c *workflow.Container) *TemplateToken {
 
 	if len(c.Volumes) > 0 {
 		pairs = append(pairs, TemplateTokenMapPair{Key: "volumes", Value: NewTemplateTokenSequence(c.Volumes)})
+	}
+
+	if c.Credentials != nil && c.Credentials.Username != "" {
+		credPairs := []TemplateTokenMapPair{
+			{Key: "username", Value: NewTemplateTokenString(c.Credentials.Username)},
+			{Key: "password", Value: NewTemplateTokenString(c.Credentials.Password)},
+		}
+		ct := 2 // Mapping
+		pairs = append(pairs, TemplateTokenMapPair{Key: "credentials", Value: &TemplateToken{TokenType: &ct, MapPairs: credPairs}})
 	}
 
 	t := 2 // Mapping

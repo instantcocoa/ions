@@ -1,0 +1,31 @@
+name: Continue on Error Test
+
+on: push
+
+jobs:
+  flaky:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - run: echo "This job might fail but it's ok"
+      - run: exit 1
+
+  depends-on-flaky:
+    needs: flaky
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "I should still run because flaky has continue-on-error"
+
+  cleanup:
+    needs: [flaky, depends-on-flaky]
+    if: failure()
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "Cleanup on failure"
+
+  always-run:
+    needs: [flaky]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "I always run"

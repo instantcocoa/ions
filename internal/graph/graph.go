@@ -10,12 +10,15 @@ import (
 
 // JobNode represents a concrete job instance (after matrix expansion).
 type JobNode struct {
-	JobID        string            // original job ID from workflow
-	JobName      string            // display name
-	Job          *workflow.Job     // reference to original job definition
-	MatrixValues MatrixCombination // matrix values for this instance (nil if no matrix)
-	DependsOn    []string          // node IDs this depends on
-	NodeID       string            // unique node ID (jobID for non-matrix, jobID (key: val, ...) for matrix)
+	JobID            string            // original job ID from workflow
+	JobName          string            // display name
+	Job              *workflow.Job     // reference to original job definition
+	MatrixValues     MatrixCombination // matrix values for this instance (nil if no matrix)
+	DependsOn        []string          // node IDs this depends on
+	NodeID           string            // unique node ID (jobID for non-matrix, jobID (key: val, ...) for matrix)
+	NeedsRuntimeEval bool              // true if the job's if: condition references runtime data (needs, failure(), etc.)
+	JobIndex         int               // zero-based index within the matrix group (0 for non-matrix)
+	JobTotal         int               // total number of nodes in the matrix group (1 for non-matrix)
 }
 
 // Graph represents the dependency graph of jobs.
@@ -61,16 +64,18 @@ func Build(w *workflow.Workflow) (*Graph, error) {
 		if len(combos) == 0 {
 			// No matrix expansion: single node.
 			node := &JobNode{
-				JobID:   jobID,
-				JobName: baseName,
-				Job:     job,
-				NodeID:  jobID,
+				JobID:    jobID,
+				JobName:  baseName,
+				Job:      job,
+				NodeID:   jobID,
+				JobIndex: 0,
+				JobTotal: 1,
 			}
 			g.Nodes[node.NodeID] = node
 			jobToNodes[jobID] = append(jobToNodes[jobID], node.NodeID)
 		} else {
 			// Matrix expansion: one node per combo.
-			for _, combo := range combos {
+			for i, combo := range combos {
 				nodeID := matrixNodeID(jobID, combo)
 				nodeName := baseName + " " + matrixSuffix(combo)
 				node := &JobNode{
@@ -79,6 +84,8 @@ func Build(w *workflow.Workflow) (*Graph, error) {
 					Job:          job,
 					MatrixValues: combo,
 					NodeID:       nodeID,
+					JobIndex:     i,
+					JobTotal:     len(combos),
 				}
 				g.Nodes[node.NodeID] = node
 				jobToNodes[jobID] = append(jobToNodes[jobID], node.NodeID)

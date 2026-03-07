@@ -31,12 +31,27 @@ func (s *Server) handleActionTarball(w http.ResponseWriter, r *http.Request) {
 	}
 	owner, repo, ref := parts[0], parts[1], parts[2]
 
-	upstreamURL := fmt.Sprintf("https://api.github.com/repos/%s/%s/tarball/%s", owner, repo, ref)
+	apiBase := s.actionAPIBase
+	if apiBase == "" {
+		apiBase = "https://api.github.com"
+	}
+	upstreamURL := fmt.Sprintf("%s/repos/%s/%s/tarball/%s", apiBase, owner, repo, ref)
 	if s.verbose {
 		log.Printf("[broker] proxying action tarball: %s/%s@%s", owner, repo, ref)
 	}
 
-	resp, err := http.Get(upstreamURL)
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, upstreamURL, nil)
+	if err != nil {
+		log.Printf("[broker] tarball request error: %v", err)
+		http.Error(w, "upstream request failed", http.StatusInternalServerError)
+		return
+	}
+	req.Header.Set("User-Agent", "ions/1.0")
+	if s.githubToken != "" {
+		req.Header.Set("Authorization", "Bearer "+s.githubToken)
+	}
+
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		log.Printf("[broker] tarball fetch error: %v", err)
 		http.Error(w, "upstream fetch failed", http.StatusBadGateway)

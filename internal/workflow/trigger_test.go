@@ -201,3 +201,82 @@ workflow_call:
 	require.Contains(t, wc.Outputs, "result")
 	assert.Equal(t, "${{ jobs.build.outputs.result }}", wc.Outputs["result"].Value)
 }
+
+func TestWorkflowCallInputs_Present(t *testing.T) {
+	input := `
+workflow_call:
+  inputs:
+    version:
+      description: 'Version to deploy'
+      required: true
+      default: '1.0'
+      type: string
+`
+	var tr Triggers
+	err := yaml.Unmarshal([]byte(input), &tr)
+	require.NoError(t, err)
+
+	inputs := tr.WorkflowCallInputs()
+	require.NotNil(t, inputs)
+	assert.Contains(t, inputs, "version")
+	assert.Equal(t, "Version to deploy", inputs["version"].Description)
+	assert.True(t, inputs["version"].Required)
+	assert.Equal(t, "1.0", inputs["version"].Default)
+}
+
+func TestWorkflowCallInputs_NoWorkflowCall(t *testing.T) {
+	var tr Triggers
+	err := yaml.Unmarshal([]byte(`push`), &tr)
+	require.NoError(t, err)
+	assert.Nil(t, tr.WorkflowCallInputs())
+}
+
+func TestWorkflowCallInputs_NilConfig(t *testing.T) {
+	var tr Triggers
+	err := yaml.Unmarshal([]byte("workflow_call:"), &tr)
+	require.NoError(t, err)
+	assert.Nil(t, tr.WorkflowCallInputs())
+}
+
+func TestWorkflowCallOutputs_Present(t *testing.T) {
+	input := `
+workflow_call:
+  outputs:
+    artifact_url:
+      description: 'URL of the built artifact'
+      value: ${{ jobs.build.outputs.url }}
+`
+	var tr Triggers
+	err := yaml.Unmarshal([]byte(input), &tr)
+	require.NoError(t, err)
+
+	outputs := tr.WorkflowCallOutputs()
+	require.NotNil(t, outputs)
+	assert.Contains(t, outputs, "artifact_url")
+	assert.Equal(t, "${{ jobs.build.outputs.url }}", outputs["artifact_url"].Value)
+}
+
+func TestWorkflowCallOutputs_NoWorkflowCall(t *testing.T) {
+	var tr Triggers
+	err := yaml.Unmarshal([]byte(`push`), &tr)
+	require.NoError(t, err)
+	assert.Nil(t, tr.WorkflowCallOutputs())
+}
+
+func TestWorkflowCallOutputs_NilConfig(t *testing.T) {
+	var tr Triggers
+	err := yaml.Unmarshal([]byte("workflow_call:"), &tr)
+	require.NoError(t, err)
+	assert.Nil(t, tr.WorkflowCallOutputs())
+}
+
+func TestTriggers_ScheduleEmptyList(t *testing.T) {
+	input := `
+schedule: []
+`
+	var tr Triggers
+	err := yaml.Unmarshal([]byte(input), &tr)
+	require.NoError(t, err)
+	// Empty schedule produces nil config.
+	assert.Nil(t, tr.Events["schedule"])
+}

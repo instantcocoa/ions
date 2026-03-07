@@ -271,6 +271,82 @@ func TestInstallAlreadyExists(t *testing.T) {
 	assert.Equal(t, "2.319.1", ver)
 }
 
+func TestInstallComputesChecksum(t *testing.T) {
+	archiveData := createTestArchive(t, map[string]string{
+		"run.sh": "#!/bin/bash\necho running",
+	})
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write(archiveData)
+	}))
+	defer ts.Close()
+
+	dir := t.TempDir()
+	mgr, err := NewManagerWithBaseDir(dir)
+	require.NoError(t, err)
+
+	mgr.httpClient = &http.Client{
+		Transport: rewriteTransport{base: http.DefaultTransport, baseURL: ts.URL},
+	}
+
+	err = mgr.Install(context.Background(), "2.319.1")
+	require.NoError(t, err)
+
+	// Config should contain a SHA-256 hash.
+	cfg, err := mgr.loadConfig()
+	require.NoError(t, err)
+	assert.Len(t, cfg.SHA256, 64, "SHA-256 should be 64 hex characters")
+	assert.NotEmpty(t, cfg.SHA256)
+}
+
+func TestInstallChecksumMismatch(t *testing.T) {
+	archiveData := createTestArchive(t, map[string]string{
+		"run.sh": "#!/bin/bash\necho running",
+	})
+	differentArchive := createTestArchive(t, map[string]string{
+		"run.sh": "#!/bin/bash\necho DIFFERENT",
+	})
+
+	callCount := 0
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		if callCount == 1 {
+			w.Write(archiveData)
+		} else {
+			w.Write(differentArchive)
+		}
+	}))
+	defer ts.Close()
+
+	dir := t.TempDir()
+	mgr, err := NewManagerWithBaseDir(dir)
+	require.NoError(t, err)
+
+	mgr.httpClient = &http.Client{
+		Transport: rewriteTransport{base: http.DefaultTransport, baseURL: ts.URL},
+	}
+
+	// First install.
+	err = mgr.Install(context.Background(), "2.319.1")
+	require.NoError(t, err)
+
+	firstCfg, err := mgr.loadConfig()
+	require.NoError(t, err)
+	firstHash := firstCfg.SHA256
+
+	// Remove the version directory to force re-download.
+	require.NoError(t, os.RemoveAll(mgr.VersionDir("2.319.1")))
+
+	// Second install with different archive should fail checksum verification.
+	err = mgr.Install(context.Background(), "2.319.1")
+	assert.ErrorContains(t, err, "checksum mismatch")
+
+	// The stored hash should still be the original.
+	cfg, err := mgr.loadConfig()
+	require.NoError(t, err)
+	assert.Equal(t, firstHash, cfg.SHA256)
+}
+
 func TestInstallHTTPError(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)

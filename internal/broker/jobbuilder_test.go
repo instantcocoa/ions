@@ -26,6 +26,19 @@ func templateMapGet(t *TemplateToken, key string) string {
 	return ""
 }
 
+// templateMapGetToken extracts a nested TemplateToken from a mapping by key.
+func templateMapGetToken(t *TemplateToken, key string) *TemplateToken {
+	if t == nil {
+		return nil
+	}
+	for _, p := range t.MapPairs {
+		if p.Key == key {
+			return p.Value
+		}
+	}
+	return nil
+}
+
 func makeHelloWorldJob() *workflow.Job {
 	return &workflow.Job{
 		Name:   "greet",
@@ -74,7 +87,7 @@ func TestBuildJobMessage_HelloWorld(t *testing.T) {
 	assert.NotEmpty(t, msg.JobID)
 	assert.NotEmpty(t, msg.Plan.PlanID)
 	assert.NotEmpty(t, msg.Timeline.ID)
-	assert.Equal(t, int64(1), msg.RequestID)
+	assert.Greater(t, msg.RequestID, int64(0))
 
 	// Check steps
 	require.Len(t, msg.Steps, 2)
@@ -151,8 +164,8 @@ func TestBuildJobMessage_WithDefaults(t *testing.T) {
 	assert.Equal(t, "/app", msg.Defaults.Run.WorkingDirectory)
 }
 
-func TestBuildJobMessage_WithContainer(t *testing.T) {
-	// ions manages containers itself (not the runner), so JobContainer should be nil.
+func TestBuildJobMessage_WithContainer_Default(t *testing.T) {
+	// Without UseRunnerContainers, JobContainer should be nil.
 	job := &workflow.Job{
 		Name:   "containerized",
 		RunsOn: workflow.RunsOn{Labels: []string{"ubuntu-latest"}},
@@ -172,12 +185,40 @@ func TestBuildJobMessage_WithContainer(t *testing.T) {
 	msg, err := BuildJobMessage(node, job, expression.MapContext{}, "http://localhost:8080", "run-1", nil)
 	require.NoError(t, err)
 
-	// We don't pass container info to the runner — ions handles Docker itself.
 	assert.Nil(t, msg.JobContainer)
 }
 
-func TestBuildJobMessage_WithServices(t *testing.T) {
-	// ions manages service containers itself (not the runner), so JobServiceContainers should be nil.
+func TestBuildJobMessage_WithContainer_RunnerManaged(t *testing.T) {
+	// With UseRunnerContainers, JobContainer should be set.
+	job := &workflow.Job{
+		Name:   "containerized",
+		RunsOn: workflow.RunsOn{Labels: []string{"ubuntu-latest"}},
+		Container: &workflow.Container{
+			Image:   "node:18",
+			Env:     map[string]string{"NODE_ENV": "test"},
+			Ports:   []string{"3000:3000"},
+			Options: "--cpus 2",
+		},
+		Steps: []workflow.Step{
+			{Run: "node --version"},
+		},
+	}
+	node := &graph.JobNode{
+		JobID: "containerized", JobName: "containerized", Job: job, NodeID: "containerized",
+	}
+
+	msg, err := BuildJobMessage(node, job, expression.MapContext{}, "http://localhost:8080", "run-1", nil,
+		JobMessageOptions{UseRunnerContainers: true})
+	require.NoError(t, err)
+
+	require.NotNil(t, msg.JobContainer)
+	assert.Equal(t, "node:18", templateMapGet(msg.JobContainer, "image"))
+	assert.Equal(t, "--cpus 2", templateMapGet(msg.JobContainer, "options"))
+	assert.Equal(t, "test", templateMapGet(templateMapGetToken(msg.JobContainer, "env"), "NODE_ENV"))
+}
+
+func TestBuildJobMessage_WithServices_Default(t *testing.T) {
+	// Without UseRunnerContainers, services should not be in the message.
 	job := &workflow.Job{
 		Name:   "with-services",
 		RunsOn: workflow.RunsOn{Labels: []string{"ubuntu-latest"}},
@@ -202,8 +243,42 @@ func TestBuildJobMessage_WithServices(t *testing.T) {
 	msg, err := BuildJobMessage(node, job, expression.MapContext{}, "http://localhost:8080", "run-1", nil)
 	require.NoError(t, err)
 
-	// We don't pass service container info to the runner — ions handles Docker itself.
 	assert.Nil(t, msg.JobServiceContainers)
+}
+
+func TestBuildJobMessage_WithServices_RunnerManaged(t *testing.T) {
+	job := &workflow.Job{
+		Name:   "with-services",
+		RunsOn: workflow.RunsOn{Labels: []string{"ubuntu-latest"}},
+		Container: &workflow.Container{
+			Image: "node:18",
+		},
+		Services: map[string]*workflow.Container{
+			"postgres": {
+				Image: "postgres:15",
+				Env:   map[string]string{"POSTGRES_PASSWORD": "test"},
+				Ports: []string{"5432:5432"},
+			},
+		},
+		Steps: []workflow.Step{
+			{Run: "echo services"},
+		},
+	}
+	node := &graph.JobNode{
+		JobID: "with-services", JobName: "with-services", Job: job, NodeID: "with-services",
+	}
+
+	msg, err := BuildJobMessage(node, job, expression.MapContext{}, "http://localhost:8080", "run-1", nil,
+		JobMessageOptions{UseRunnerContainers: true})
+	require.NoError(t, err)
+
+	require.NotNil(t, msg.JobContainer)
+	assert.Equal(t, "node:18", templateMapGet(msg.JobContainer, "image"))
+
+	require.NotNil(t, msg.JobServiceContainers)
+	pgToken := templateMapGetToken(msg.JobServiceContainers, "postgres")
+	require.NotNil(t, pgToken)
+	assert.Equal(t, "postgres:15", templateMapGet(pgToken, "image"))
 }
 
 func TestBuildJobMessage_ActionStep(t *testing.T) {
@@ -233,6 +308,35 @@ func TestBuildJobMessage_ActionStep(t *testing.T) {
 	assert.Equal(t, "actions/checkout", step.Reference.Name)
 	assert.Equal(t, "v4", step.Reference.Ref)
 	assert.Equal(t, "0", templateMapGet(step.Inputs, "fetch-depth"))
+}
+
+func TestBuildJobMessage_DockerActionStep(t *testing.T) {
+	job := &workflow.Job{
+		Name:   "docker-test",
+		RunsOn: workflow.RunsOn{Labels: []string{"ubuntu-latest"}},
+		Steps: []workflow.Step{
+			{
+				Name: "Run Alpine",
+				Uses: "docker://alpine:3.19",
+				With: map[string]string{"args": "echo hello"},
+				Env:  map[string]string{"MY_VAR": "test"},
+			},
+		},
+	}
+	node := &graph.JobNode{
+		JobID: "docker-test", JobName: "docker-test", Job: job, NodeID: "docker-test",
+	}
+
+	msg, err := BuildJobMessage(node, job, expression.MapContext{}, "http://localhost:8080", "run-1", nil)
+	require.NoError(t, err)
+
+	require.Len(t, msg.Steps, 1)
+	step := msg.Steps[0]
+	assert.Equal(t, StepTypeAction, step.Type)
+	assert.Equal(t, "Run Alpine", step.DisplayName)
+	assert.Equal(t, ActionSourceContainerRegistry, step.Reference.Type)
+	assert.Equal(t, "docker://alpine:3.19", step.Reference.Image)
+	assert.Equal(t, "echo hello", templateMapGet(step.Inputs, "args"))
 }
 
 func TestBuildJobMessage_StepWithID(t *testing.T) {

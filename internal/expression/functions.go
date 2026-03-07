@@ -4,7 +4,11 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"io/fs"
 	"math"
+	"os"
+	"path/filepath"
+	"sort"
 	"strings"
 )
 
@@ -23,6 +27,10 @@ func BuiltinFunctions() map[string]Function {
 		"tojson":     fnToJSON,
 		"fromjson":   fnFromJSON,
 		"hashfiles":  fnHashFiles,
+		"min":        fnMin,
+		"max":        fnMax,
+		"keys":       fnKeys,
+		"values":     fnValues,
 	}
 }
 
@@ -230,14 +238,12 @@ func goToValue(v interface{}) Value {
 	}
 }
 
-// fnHashFiles implements hashFiles(patterns...).
-// Stub implementation that returns a deterministic placeholder hash.
-// Real implementation needs filesystem access that will be wired up later.
+// fnHashFiles implements hashFiles(patterns...) as a stub when no workDir is set.
+// It hashes the pattern strings to produce deterministic output for testing.
 func fnHashFiles(args []Value) (Value, error) {
 	if len(args) < 1 {
 		return Null(), fmt.Errorf("hashFiles() requires at least 1 argument, got %d", len(args))
 	}
-	// Create a deterministic hash from the patterns so tests are stable
 	h := sha256.New()
 	for _, arg := range args {
 		s := CoerceToString(arg)
@@ -245,6 +251,215 @@ func fnHashFiles(args []Value) (Value, error) {
 	}
 	hash := fmt.Sprintf("%x", h.Sum(nil))
 	return String(hash), nil
+}
+
+// SetHashFilesWorkDir replaces the stub hashFiles in fns with a real
+// implementation that globs files relative to workDir and hashes their contents.
+func SetHashFilesWorkDir(fns map[string]Function, workDir string) {
+	if workDir == "" {
+		return
+	}
+	fns["hashfiles"] = makeHashFilesFunc(workDir)
+}
+
+// makeHashFilesFunc creates a hashFiles function that resolves glob patterns
+// against the given working directory and hashes matched file contents.
+func makeHashFilesFunc(workDir string) Function {
+	return func(args []Value) (Value, error) {
+		if len(args) < 1 {
+			return Null(), fmt.Errorf("hashFiles() requires at least 1 argument, got %d", len(args))
+		}
+
+		// Collect all matching files across all patterns.
+		seen := make(map[string]bool)
+		var allFiles []string
+
+		for _, arg := range args {
+			pattern := CoerceToString(arg)
+			matches, err := globFiles(workDir, pattern)
+			if err != nil {
+				return Null(), fmt.Errorf("hashFiles() glob error: %w", err)
+			}
+			for _, m := range matches {
+				if !seen[m] {
+					seen[m] = true
+					allFiles = append(allFiles, m)
+				}
+			}
+		}
+
+		if len(allFiles) == 0 {
+			return String(""), nil
+		}
+
+		// Sort for deterministic output.
+		sort.Strings(allFiles)
+
+		// Hash all file contents: compute per-file SHA-256 then hash
+		// the concatenation of all file hashes.
+		h := sha256.New()
+		for _, relPath := range allFiles {
+			data, err := os.ReadFile(filepath.Join(workDir, relPath))
+			if err != nil {
+				return Null(), fmt.Errorf("hashFiles() read error for %s: %w", relPath, err)
+			}
+			fileHash := sha256.Sum256(data)
+			h.Write(fileHash[:])
+		}
+
+		return String(fmt.Sprintf("%x", h.Sum(nil))), nil
+	}
+}
+
+// globFiles walks workDir and returns relative paths of files matching pattern.
+// Supports ** for recursive directory matching.
+func globFiles(root, pattern string) ([]string, error) {
+	// Normalize pattern separators.
+	pattern = filepath.ToSlash(pattern)
+
+	var matches []string
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil // skip inaccessible entries
+		}
+		if d.IsDir() {
+			return nil // only match files
+		}
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			return nil
+		}
+		rel = filepath.ToSlash(rel)
+		if matchDoublestar(pattern, rel) {
+			matches = append(matches, rel)
+		}
+		return nil
+	})
+	return matches, err
+}
+
+// matchDoublestar matches a path against a pattern that may contain **
+// for recursive directory matching, plus standard glob characters (*, ?, [...]).
+func matchDoublestar(pattern, name string) bool {
+	patParts := strings.Split(pattern, "/")
+	nameParts := strings.Split(name, "/")
+	return matchParts(patParts, nameParts)
+}
+
+// matchParts recursively matches pattern segments against path segments.
+func matchParts(pattern, path []string) bool {
+	for len(pattern) > 0 {
+		seg := pattern[0]
+
+		if seg == "**" {
+			// ** matches zero or more path segments.
+			rest := pattern[1:]
+
+			// Skip consecutive ** segments.
+			for len(rest) > 0 && rest[0] == "**" {
+				rest = rest[1:]
+			}
+
+			// Try matching rest against every suffix of path.
+			for i := 0; i <= len(path); i++ {
+				if matchParts(rest, path[i:]) {
+					return true
+				}
+			}
+			return false
+		}
+
+		if len(path) == 0 {
+			return false
+		}
+
+		// Match single segment using filepath.Match.
+		matched, err := filepath.Match(seg, path[0])
+		if err != nil || !matched {
+			return false
+		}
+
+		pattern = pattern[1:]
+		path = path[1:]
+	}
+
+	return len(path) == 0
+}
+
+// fnMin implements min(a, b) — returns the smaller of two numeric values.
+func fnMin(args []Value) (Value, error) {
+	if len(args) != 2 {
+		return Null(), fmt.Errorf("min() requires exactly 2 arguments, got %d", len(args))
+	}
+	a := CoerceToNumber(args[0])
+	b := CoerceToNumber(args[1])
+	if math.IsNaN(a) || math.IsNaN(b) {
+		return Number(math.NaN()), nil
+	}
+	if a <= b {
+		return Number(a), nil
+	}
+	return Number(b), nil
+}
+
+// fnMax implements max(a, b) — returns the larger of two numeric values.
+func fnMax(args []Value) (Value, error) {
+	if len(args) != 2 {
+		return Null(), fmt.Errorf("max() requires exactly 2 arguments, got %d", len(args))
+	}
+	a := CoerceToNumber(args[0])
+	b := CoerceToNumber(args[1])
+	if math.IsNaN(a) || math.IsNaN(b) {
+		return Number(math.NaN()), nil
+	}
+	if a >= b {
+		return Number(a), nil
+	}
+	return Number(b), nil
+}
+
+// fnKeys implements keys(obj) — returns a sorted array of object keys.
+func fnKeys(args []Value) (Value, error) {
+	if len(args) != 1 {
+		return Null(), fmt.Errorf("keys() requires exactly 1 argument, got %d", len(args))
+	}
+	obj := args[0]
+	if obj.Kind() != KindObject {
+		return Array(nil), nil
+	}
+	fields := obj.ObjectFields()
+	keys := make([]string, 0, len(fields))
+	for k := range fields {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	items := make([]Value, len(keys))
+	for i, k := range keys {
+		items[i] = String(k)
+	}
+	return Array(items), nil
+}
+
+// fnValues implements values(obj) — returns an array of object values in key-sorted order.
+func fnValues(args []Value) (Value, error) {
+	if len(args) != 1 {
+		return Null(), fmt.Errorf("values() requires exactly 1 argument, got %d", len(args))
+	}
+	obj := args[0]
+	if obj.Kind() != KindObject {
+		return Array(nil), nil
+	}
+	fields := obj.ObjectFields()
+	keys := make([]string, 0, len(fields))
+	for k := range fields {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	items := make([]Value, len(keys))
+	for i, k := range keys {
+		items[i] = fields[k]
+	}
+	return Array(items), nil
 }
 
 // LookupFunction looks up a function by name (case-insensitive).

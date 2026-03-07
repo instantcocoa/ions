@@ -352,3 +352,103 @@ jobs:
 	require.NotNil(t, job.Steps[0].TimeoutMinutes)
 	assert.Equal(t, 5, *job.Steps[0].TimeoutMinutes)
 }
+
+func TestParse_RunName(t *testing.T) {
+	input := `
+name: CI
+run-name: Build ${{ github.ref_name }}
+on: push
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo building
+`
+	w, err := Parse(strings.NewReader(input))
+	require.NoError(t, err)
+	assert.Equal(t, "CI", w.Name)
+	assert.Equal(t, "Build ${{ github.ref_name }}", w.RunName)
+}
+
+func TestParse_StepEntrypointAndArgs(t *testing.T) {
+	input := `
+name: Docker Step
+on: push
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: docker://alpine:3.18
+        with:
+          entrypoint: /bin/sh
+          args: -c "echo hello"
+      - uses: docker://node:18
+        entrypoint: /usr/local/bin/node
+        args: --version
+`
+	w, err := Parse(strings.NewReader(input))
+	require.NoError(t, err)
+
+	job := w.Jobs["build"]
+	require.Len(t, job.Steps, 2)
+
+	// Step 0: entrypoint/args passed via 'with' (action inputs)
+	assert.Equal(t, "/bin/sh", job.Steps[0].With["entrypoint"])
+	assert.Equal(t, `-c "echo hello"`, job.Steps[0].With["args"])
+
+	// Step 1: entrypoint/args as direct step fields
+	assert.Equal(t, "/usr/local/bin/node", job.Steps[1].Entrypoint)
+	assert.Equal(t, "--version", job.Steps[1].Args)
+}
+
+func TestParse_ContainerEntrypointAndArgs(t *testing.T) {
+	input := `
+name: Container Fields
+on: push
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container:
+      image: node:18
+      entrypoint: /usr/local/bin/node
+      args: --version
+      env:
+        NODE_ENV: production
+    steps:
+      - run: echo testing
+`
+	w, err := Parse(strings.NewReader(input))
+	require.NoError(t, err)
+
+	job := w.Jobs["build"]
+	require.NotNil(t, job.Container)
+	assert.Equal(t, "node:18", job.Container.Image)
+	assert.Equal(t, "/usr/local/bin/node", job.Container.Entrypoint)
+	assert.Equal(t, "--version", job.Container.Args)
+	assert.Equal(t, "production", job.Container.Env["NODE_ENV"])
+}
+
+func TestParse_ServiceContainerEntrypoint(t *testing.T) {
+	input := `
+name: Service entrypoint
+on: push
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      db:
+        image: postgres:15
+        entrypoint: docker-entrypoint.sh
+        env:
+          POSTGRES_PASSWORD: secret
+    steps:
+      - run: echo ok
+`
+	w, err := Parse(strings.NewReader(input))
+	require.NoError(t, err)
+
+	svc := w.Jobs["test"].Services["db"]
+	require.NotNil(t, svc)
+	assert.Equal(t, "postgres:15", svc.Image)
+	assert.Equal(t, "docker-entrypoint.sh", svc.Entrypoint)
+}

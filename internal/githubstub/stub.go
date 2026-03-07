@@ -1,6 +1,7 @@
 package githubstub
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -24,9 +25,10 @@ type RepoInfo struct {
 
 // Options configures the GitHub API stub server.
 type Options struct {
-	Token   string            // optional real GitHub token for passthrough
-	Verbose bool              // log all requests
-	Vars    map[string]string // --var values for actions/variables endpoint
+	Token       string            // optional real GitHub token for passthrough
+	Verbose     bool              // log all requests
+	Vars        map[string]string // --var values for actions/variables endpoint
+	ProxyWrites bool              // also proxy POST/PATCH/PUT to real GitHub API
 }
 
 // Server implements a local stub of the GitHub REST API.
@@ -82,6 +84,10 @@ func (s *Server) RegisterRoutes(mux *http.ServeMux) {
 	// User endpoint.
 	mux.HandleFunc("GET /api/v3/user", wrap(s.handleGetUser))
 
+	// OIDC token endpoint stub.
+	mux.HandleFunc("POST /_apis/actionstoken/generateidtoken", wrap(s.handleGenerateIDToken))
+	mux.HandleFunc("GET /_apis/actionstoken/generateidtoken", wrap(s.handleGenerateIDToken))
+
 	// GraphQL stub.
 	mux.HandleFunc("POST /api/v3/graphql", wrap(s.handleGraphQL))
 	mux.HandleFunc("POST /api/graphql", wrap(s.handleGraphQL))
@@ -110,7 +116,13 @@ func (s *Server) middleware(next http.HandlerFunc) http.HandlerFunc {
 }
 
 // handleCatchAll responds to any unhandled API endpoint.
+// If a GitHub token is configured, GET requests are proxied to the real API.
 func (s *Server) handleCatchAll(w http.ResponseWriter, r *http.Request) {
+	// Try passthrough for GET requests when a token is available.
+	if s.ProxyToGitHub(w, r) {
+		return
+	}
+
 	log.Printf("[github-stub] unhandled: %s %s", r.Method, r.URL.Path)
 	if s.opts.Verbose {
 		body, _ := io.ReadAll(r.Body)
@@ -142,18 +154,85 @@ func (s *Server) handleGetUser(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleGraphQL returns a minimal stub for GraphQL requests.
+// handleGraphQL proxies GraphQL requests to the real GitHub API when a token
+// is available, otherwise returns a minimal empty stub.
 func (s *Server) handleGraphQL(w http.ResponseWriter, r *http.Request) {
-	log.Printf("[github-stub] GraphQL request received (stub — returning empty data)")
-	if s.opts.Verbose {
-		body, _ := io.ReadAll(r.Body)
-		if len(body) > 0 {
-			log.Printf("[github-stub] GraphQL query: %s", string(body))
+	body, _ := io.ReadAll(r.Body)
+
+	// If a token is available, proxy to real GitHub GraphQL API.
+	if s.opts.Token != "" {
+		if s.opts.Verbose {
+			log.Printf("[github-stub] proxying GraphQL request to GitHub")
+			if len(body) > 0 {
+				log.Printf("[github-stub] GraphQL query: %s", string(body))
+			}
 		}
+
+		client := &http.Client{Timeout: 30 * time.Second}
+		proxyReq, err := http.NewRequestWithContext(r.Context(), http.MethodPost, githubAPIBase+"/graphql", strings.NewReader(string(body)))
+		if err != nil {
+			log.Printf("[github-stub] GraphQL proxy error: %v", err)
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"errors": []any{map[string]any{"message": "proxy error"}}})
+			return
+		}
+		proxyReq.Header.Set("Authorization", "Bearer "+s.opts.Token)
+		proxyReq.Header.Set("Content-Type", "application/json")
+		proxyReq.Header.Set("User-Agent", "ions/1.0")
+
+		resp, err := client.Do(proxyReq)
+		if err != nil {
+			log.Printf("[github-stub] GraphQL proxy error: %v", err)
+			writeJSON(w, http.StatusBadGateway, map[string]any{"errors": []any{map[string]any{"message": "upstream error"}}})
+			return
+		}
+		defer resp.Body.Close()
+
+		for key, values := range resp.Header {
+			for _, v := range values {
+				w.Header().Add(key, v)
+			}
+		}
+		w.WriteHeader(resp.StatusCode)
+		io.Copy(w, resp.Body)
+		return
+	}
+
+	log.Printf("[github-stub] GraphQL request received (stub — returning empty data)")
+	if s.opts.Verbose && len(body) > 0 {
+		log.Printf("[github-stub] GraphQL query: %s", string(body))
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"data": map[string]any{},
 	})
+}
+
+// handleGenerateIDToken returns a stub OIDC JWT token.
+// This allows workflows using permissions: id-token: write to at least get a
+// token, even though it won't be valid for real cloud provider auth.
+func (s *Server) handleGenerateIDToken(w http.ResponseWriter, r *http.Request) {
+	audience := r.URL.Query().Get("audience")
+	if audience == "" {
+		audience = "api://AzureADTokenExchange"
+	}
+
+	// Build a minimal unsigned JWT stub (alg: none).
+	now := time.Now().Unix()
+	header := base64URLEncode([]byte(`{"typ":"JWT","alg":"none"}`))
+	payload := base64URLEncode([]byte(fmt.Sprintf(
+		`{"aud":"%s","iss":"https://token.actions.githubusercontent.com","sub":"ions-local","iat":%d,"exp":%d,"nbf":%d}`,
+		audience, now, now+3600, now,
+	)))
+
+	token := header + "." + payload + "."
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"value": token,
+	})
+}
+
+// base64URLEncode encodes data using base64url without padding.
+func base64URLEncode(data []byte) string {
+	return base64.RawURLEncoding.EncodeToString(data)
 }
 
 // allocID returns a monotonically increasing ID for stub resources.

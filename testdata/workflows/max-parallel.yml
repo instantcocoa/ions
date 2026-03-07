@@ -1,0 +1,13 @@
+name: Max Parallel Test
+
+on: push
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      max-parallel: 2
+      matrix:
+        version: [14, 16, 18, 20]
+    steps:
+      - run: echo "Testing node ${{ matrix.version }}"

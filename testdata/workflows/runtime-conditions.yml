@@ -1,0 +1,50 @@
+name: Runtime Conditions Test
+
+on: push
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "Building"
+
+  test:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "Testing"
+
+  deploy:
+    needs: [build, test]
+    if: success()
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "Deploying because all deps succeeded"
+
+  notify-failure:
+    needs: [build, test]
+    if: failure()
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "Notifying because something failed"
+
+  notify-cancel:
+    needs: [build, test]
+    if: cancelled()
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "Workflow was cancelled"
+
+  cleanup:
+    needs: [build, test, deploy]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "Always runs"
+
+  conditional-deploy:
+    needs: build
+    if: needs.build.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "Deploying because build succeeded"

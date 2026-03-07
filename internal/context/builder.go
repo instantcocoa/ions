@@ -55,6 +55,15 @@ type BuilderOptions struct {
 	// Which jobs this job depends on
 	JobNeeds []string
 
+	// Strategy context fields
+	FailFast    *bool // nil means default (true)
+	JobIndex    int
+	JobTotal    int
+	MaxParallel *int
+
+	// Job status for the job context ("success", "failure", "cancelled")
+	JobStatus string
+
 	// APIBaseURL overrides the default https://api.github.com for the
 	// github.api_url and github.graphql_url context fields.
 	// Set by the orchestrator to route API calls through the local stub.
@@ -88,7 +97,40 @@ func (b *Builder) FullContext() expression.MapContext {
 		"secrets":  SecretsContext(b.opts.Secrets),
 		"inputs":   InputsContext(b.opts.Inputs),
 		"vars":     VarsContext(b.opts.Vars),
-		"strategy": expression.Object(map[string]expression.Value{}),
-		"job":      expression.Object(map[string]expression.Value{}),
+		"strategy": StrategyContext(b.opts),
+		"job":      JobContext(b.opts),
 	}
+}
+
+// StrategyContext builds the "strategy" context object.
+func StrategyContext(opts BuilderOptions) expression.Value {
+	failFast := true // GitHub default
+	if opts.FailFast != nil {
+		failFast = *opts.FailFast
+	}
+
+	fields := map[string]expression.Value{
+		"fail-fast": expression.Bool(failFast),
+		"job-index": expression.Number(float64(opts.JobIndex)),
+		"job-total": expression.Number(float64(opts.JobTotal)),
+	}
+
+	if opts.MaxParallel != nil {
+		fields["max-parallel"] = expression.Number(float64(*opts.MaxParallel))
+	} else {
+		fields["max-parallel"] = expression.Number(float64(opts.JobTotal))
+	}
+
+	return expression.Object(fields)
+}
+
+// JobContext builds the "job" context object.
+func JobContext(opts BuilderOptions) expression.Value {
+	status := opts.JobStatus
+	if status == "" {
+		status = "success"
+	}
+	return expression.Object(map[string]expression.Value{
+		"status": expression.String(status),
+	})
 }

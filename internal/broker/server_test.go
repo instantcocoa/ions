@@ -1,9 +1,14 @@
 package broker
 
 import (
+	"archive/tar"
+	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -312,4 +317,152 @@ func TestServer_RequestLog(t *testing.T) {
 
 	logs := srv.RequestLog()
 	assert.GreaterOrEqual(t, len(logs), 2)
+}
+
+func TestServer_ActionTarball_AuthHeader(t *testing.T) {
+	// Set up a fake GitHub API that verifies the auth header.
+	var receivedAuth string
+	fakeGH := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedAuth = r.Header.Get("Authorization")
+		assert.Contains(t, r.URL.Path, "/repos/owner/repo/tarball/v1.0.0")
+
+		// Return a minimal valid gzipped tarball.
+		w.Header().Set("Content-Type", "application/gzip")
+		var buf bytes.Buffer
+		gzw := gzip.NewWriter(&buf)
+		tw := tar.NewWriter(gzw)
+
+		content := []byte("name: test\n")
+		tw.WriteHeader(&tar.Header{
+			Name: "owner-repo-abc123/action.yml",
+			Size: int64(len(content)),
+			Mode: 0644,
+		})
+		tw.Write(content)
+		tw.Close()
+		gzw.Close()
+		w.Write(buf.Bytes())
+	}))
+	defer fakeGH.Close()
+
+	srv, err := NewServer(ServerConfig{GitHubToken: "test-secret-token"})
+	require.NoError(t, err)
+
+	// Override the action API base to point to our fake server.
+	srv.actionAPIBase = fakeGH.URL
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	t.Cleanup(func() { srv.Stop(context.Background()) })
+	require.NoError(t, srv.Start(ctx))
+
+	// Request a tarball.
+	resp, err := http.Get(srv.URL() + "/_actions/tarball/owner/repo/v1.0.0")
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Equal(t, "Bearer test-secret-token", receivedAuth)
+}
+
+func TestServer_ActionTarball_NoAuth(t *testing.T) {
+	// Without a token, no Authorization header should be sent.
+	var receivedAuth string
+	fakeGH := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedAuth = r.Header.Get("Authorization")
+
+		var buf bytes.Buffer
+		gzw := gzip.NewWriter(&buf)
+		tw := tar.NewWriter(gzw)
+		content := []byte("name: test\n")
+		tw.WriteHeader(&tar.Header{
+			Name: "owner-repo-abc123/action.yml",
+			Size: int64(len(content)),
+			Mode: 0644,
+		})
+		tw.Write(content)
+		tw.Close()
+		gzw.Close()
+		w.Write(buf.Bytes())
+	}))
+	defer fakeGH.Close()
+
+	srv, err := NewServer(ServerConfig{}) // no token
+	require.NoError(t, err)
+	srv.actionAPIBase = fakeGH.URL
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	t.Cleanup(func() { srv.Stop(context.Background()) })
+	require.NoError(t, srv.Start(ctx))
+
+	resp, err := http.Get(srv.URL() + "/_actions/tarball/owner/repo/v1.0.0")
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Empty(t, receivedAuth)
+}
+
+func TestServer_ActionTarball_ExprPatching(t *testing.T) {
+	// Verify that expressions in action.yml are replaced.
+	fakeGH := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var buf bytes.Buffer
+		gzw := gzip.NewWriter(&buf)
+		tw := tar.NewWriter(gzw)
+
+		content := []byte("inputs:\n  token:\n    default: ${{ github.token }}\n  name:\n    default: ${{ github.repository }}\n")
+		tw.WriteHeader(&tar.Header{
+			Name: "owner-repo-abc123/action.yml",
+			Size: int64(len(content)),
+			Mode: 0644,
+		})
+		tw.Write(content)
+		tw.Close()
+		gzw.Close()
+		w.Write(buf.Bytes())
+	}))
+	defer fakeGH.Close()
+
+	srv, err := NewServer(ServerConfig{
+		ExprDefaults: map[string]string{
+			"github.token":      "ghs_xxx",
+			"github.repository": "octocat/hello",
+		},
+	})
+	require.NoError(t, err)
+	srv.actionAPIBase = fakeGH.URL
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	t.Cleanup(func() { srv.Stop(context.Background()) })
+	require.NoError(t, srv.Start(ctx))
+
+	resp, err := http.Get(srv.URL() + "/_actions/tarball/owner/repo/v1.0.0")
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+
+	// Read the patched tarball and find action.yml.
+	gzr, err := gzip.NewReader(resp.Body)
+	require.NoError(t, err)
+	tr := tar.NewReader(gzr)
+
+	var actionContent string
+	for {
+		hdr, err := tr.Next()
+		if err != nil {
+			break
+		}
+		if strings.HasSuffix(hdr.Name, "action.yml") {
+			data, _ := io.ReadAll(tr)
+			actionContent = string(data)
+			break
+		}
+	}
+
+	assert.Contains(t, actionContent, "ghs_xxx")
+	assert.Contains(t, actionContent, "octocat/hello")
+	assert.NotContains(t, actionContent, "${{")
 }

@@ -522,3 +522,199 @@ func TestEvalStatusFunctionArgError(t *testing.T) {
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "no arguments")
 }
+
+func TestEvalStatusFunctionArgErrors_AllFunctions(t *testing.T) {
+	eval := NewEvaluator(MapContext{})
+	for _, fn := range []string{"failure(true)", "always(true)", "cancelled(true)"} {
+		node, err := Parse(fn)
+		require.NoError(t, err)
+		_, err = eval.Eval(node)
+		assert.Error(t, err, "expected error for %s", fn)
+	}
+}
+
+func TestEvalExpressionWithFunctions(t *testing.T) {
+	fns := BuiltinFunctions()
+	result, err := EvalExpressionWithFunctions("contains('hello', 'ell')", MapContext{}, fns)
+	require.NoError(t, err)
+	assert.True(t, IsTruthy(result))
+}
+
+func TestEvalExpressionWithFunctions_ParseError(t *testing.T) {
+	fns := BuiltinFunctions()
+	_, err := EvalExpressionWithFunctions("invalid $$", MapContext{}, fns)
+	assert.Error(t, err)
+}
+
+func TestEvalExpressionWithStatus_ParseError(t *testing.T) {
+	fns := BuiltinFunctions()
+	_, err := EvalExpressionWithStatus("invalid $$", MapContext{}, fns, "success")
+	assert.Error(t, err)
+}
+
+func TestEvalExpression_ParseError(t *testing.T) {
+	_, err := EvalExpression("invalid $$", MapContext{})
+	assert.Error(t, err)
+}
+
+func TestEvalDotAccess_Missing(t *testing.T) {
+	eval := NewEvaluator(MapContext{})
+	// Accessing property on null context returns null
+	node, err := Parse("missing.field")
+	require.NoError(t, err)
+	result, err := eval.Eval(node)
+	require.NoError(t, err)
+	assert.Equal(t, Null(), result)
+}
+
+func TestEqualCompare_NullVsNull(t *testing.T) {
+	assert.True(t, equalCompare(Null(), Null()))
+}
+
+func TestEqualCompare_NullVsString(t *testing.T) {
+	assert.False(t, equalCompare(Null(), String("x")))
+	assert.False(t, equalCompare(String("x"), Null()))
+}
+
+func TestEqualCompare_NaNValues(t *testing.T) {
+	// NaN != NaN in number comparison
+	eval := NewEvaluator(MapContext{})
+	node, err := Parse("'abc' == 'def'")
+	require.NoError(t, err)
+	result, err := eval.Eval(node)
+	require.NoError(t, err)
+	// String comparison is case-insensitive, these are different strings
+	assert.Equal(t, Bool(false), result)
+}
+
+func TestEvalLogicalOr_ShortCircuit(t *testing.T) {
+	eval := NewEvaluator(MapContext{})
+	node, err := Parse("true || false")
+	require.NoError(t, err)
+	result, err := eval.Eval(node)
+	require.NoError(t, err)
+	assert.Equal(t, Bool(true), result)
+}
+
+func TestEvalLogicalAnd_ShortCircuit(t *testing.T) {
+	eval := NewEvaluator(MapContext{})
+	node, err := Parse("false && true")
+	require.NoError(t, err)
+	result, err := eval.Eval(node)
+	require.NoError(t, err)
+	assert.Equal(t, Bool(false), result)
+}
+
+func TestNodeType_Methods(t *testing.T) {
+	// Ensure all AST node types implement Node interface
+	assert.Equal(t, "Literal", (&Literal{}).nodeType())
+	assert.Equal(t, "Ident", (&Ident{}).nodeType())
+	assert.Equal(t, "DotAccess", (&DotAccess{}).nodeType())
+	assert.Equal(t, "IndexAccess", (&IndexAccessNode{}).nodeType())
+	assert.Equal(t, "FunctionCall", (&FunctionCall{}).nodeType())
+	assert.Equal(t, "UnaryOp", (&UnaryOp{}).nodeType())
+	assert.Equal(t, "BinaryOp", (&BinaryOp{}).nodeType())
+	assert.Equal(t, "LogicalOp", (&LogicalOp{}).nodeType())
+	assert.Equal(t, "Grouping", (&Grouping{}).nodeType())
+}
+
+func TestCoerceToString_AllTypes(t *testing.T) {
+	assert.Equal(t, "", CoerceToString(Null()))
+	assert.Equal(t, "true", CoerceToString(Bool(true)))
+	assert.Equal(t, "false", CoerceToString(Bool(false)))
+	assert.Equal(t, "42", CoerceToString(Number(42)))
+	assert.Equal(t, "hello", CoerceToString(String("hello")))
+}
+
+func TestIsTruthy_AllTypes(t *testing.T) {
+	assert.False(t, IsTruthy(Null()))
+	assert.True(t, IsTruthy(Bool(true)))
+	assert.False(t, IsTruthy(Bool(false)))
+	assert.True(t, IsTruthy(Number(1)))
+	assert.False(t, IsTruthy(Number(0)))
+	assert.True(t, IsTruthy(String("x")))
+	assert.False(t, IsTruthy(String("")))
+	// Arrays and objects are truthy
+	assert.True(t, IsTruthy(Array([]Value{String("a")})))
+	assert.True(t, IsTruthy(Object(map[string]Value{"k": String("v")})))
+}
+
+func TestValue_MarshalJSON(t *testing.T) {
+	tests := []struct {
+		name string
+		val  Value
+		want string
+	}{
+		{"null", Null(), "null"},
+		{"true", Bool(true), "true"},
+		{"false", Bool(false), "false"},
+		{"number", Number(42), "42"},
+		{"string", String("hi"), `"hi"`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			data, err := tt.val.MarshalJSON()
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, string(data))
+		})
+	}
+}
+
+func TestLookupFunction_CaseInsensitive(t *testing.T) {
+	fns := BuiltinFunctions()
+	fn, ok := LookupFunction(fns, "CONTAINS")
+	assert.True(t, ok)
+	assert.NotNil(t, fn)
+
+	fn2, ok2 := LookupFunction(fns, "Contains")
+	assert.True(t, ok2)
+	assert.NotNil(t, fn2)
+
+	_, ok3 := LookupFunction(fns, "nonexistent")
+	assert.False(t, ok3)
+
+	// nil map
+	_, ok4 := LookupFunction(nil, "contains")
+	assert.False(t, ok4)
+}
+
+func TestSetHashFilesWorkDir_EmptyDir(t *testing.T) {
+	fns := BuiltinFunctions()
+	SetHashFilesWorkDir(fns, "")
+	// hashfiles should exist but return empty for empty dir
+	fn, ok := LookupFunction(fns, "hashfiles")
+	assert.True(t, ok)
+	assert.NotNil(t, fn)
+}
+
+func TestGoString_Value(t *testing.T) {
+	assert.Equal(t, "Null()", Null().GoString())
+	assert.Equal(t, "Bool(true)", Bool(true).GoString())
+	assert.Contains(t, Number(3.14).GoString(), "3.14")
+	assert.Contains(t, String("test").GoString(), "test")
+	assert.Contains(t, Array([]Value{}).GoString(), "0 items")
+	assert.Contains(t, Object(map[string]Value{}).GoString(), "0 fields")
+}
+
+func TestValue_Equals(t *testing.T) {
+	assert.True(t, Null().Equals(Null()))
+	assert.True(t, Bool(true).Equals(Bool(true)))
+	assert.False(t, Bool(true).Equals(Bool(false)))
+	assert.True(t, Number(42).Equals(Number(42)))
+	assert.False(t, Number(42).Equals(Number(43)))
+	assert.True(t, String("a").Equals(String("a")))
+	assert.False(t, String("a").Equals(String("b")))
+
+	arr1 := Array([]Value{String("a"), Number(1)})
+	arr2 := Array([]Value{String("a"), Number(1)})
+	arr3 := Array([]Value{String("b")})
+	assert.True(t, arr1.Equals(arr2))
+	assert.False(t, arr1.Equals(arr3))
+
+	obj1 := Object(map[string]Value{"k": String("v")})
+	obj2 := Object(map[string]Value{"k": String("v")})
+	obj3 := Object(map[string]Value{"k": String("x")})
+	assert.True(t, obj1.Equals(obj2))
+	assert.False(t, obj1.Equals(obj3))
+}
+

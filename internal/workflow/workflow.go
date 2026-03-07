@@ -3,6 +3,7 @@ package workflow
 // Workflow represents a parsed GitHub Actions workflow file.
 type Workflow struct {
 	Name        string            `yaml:"name"`
+	RunName     string            `yaml:"run-name,omitempty"`
 	On          Triggers          `yaml:"on"`
 	Env         map[string]string `yaml:"env,omitempty"`
 	Defaults    *Defaults         `yaml:"defaults,omitempty"`
@@ -48,6 +49,8 @@ type Step struct {
 	ContinueOnError  ExprBool          `yaml:"continue-on-error,omitempty"`
 	TimeoutMinutes   *int              `yaml:"timeout-minutes,omitempty"`
 	WorkingDirectory string            `yaml:"working-directory,omitempty"`
+	Entrypoint       string            `yaml:"entrypoint,omitempty"`
+	Args             string            `yaml:"args,omitempty"`
 }
 
 // JobOutput represents an output from a job.

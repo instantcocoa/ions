@@ -70,7 +70,8 @@ type Server struct {
 	completedRequests map[int64]string // requestId → result ("succeeded", "failed", etc.)
 
 	// Timeline data from runner step updates.
-	timelines map[string][]TimelineRecord
+	timelines    map[string][]TimelineRecord
+	timelineToJob map[string]string // timelineId → jobId
 
 	// Log data keyed by timelineId then logId.
 	logs      map[string]map[int][]string
@@ -81,6 +82,17 @@ type Server struct {
 
 	// Expression defaults for action.yml patching.
 	exprDefaults map[string]string
+
+	// GitHub token for authenticated tarball downloads (private repos).
+	githubToken string
+
+	// actionAPIBase overrides the GitHub API base URL for action tarball downloads.
+	// Defaults to "https://api.github.com". Exposed for testing.
+	actionAPIBase string
+
+	// stepCallback is called when the runner reports step status changes.
+	// The callback receives the job ID, step name, state, and optional result.
+	stepCallback func(jobID, stepName, state string, result *string)
 
 	// Message ID counter.
 	messageIDCounter atomic.Int64
@@ -96,6 +108,9 @@ type ServerConfig struct {
 	// ActionManifestManager can't handle BasicExpressionToken in defaults, so
 	// the action tarball proxy replaces them with these resolved values.
 	ExprDefaults map[string]string
+	// GitHubToken is an optional token for authenticating action tarball
+	// downloads (needed for private repos).
+	GitHubToken string
 }
 
 // RouteRegistrar can register HTTP routes on the broker's mux.
@@ -114,15 +129,17 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 		listener:    listener,
 		baseURL:     fmt.Sprintf("http://127.0.0.1:%d", listener.Addr().(*net.TCPAddr).Port),
 		instanceID:  uuid.New().String(),
-		verbose:     cfg.Verbose,
+		verbose:      cfg.Verbose,
 		exprDefaults: cfg.ExprDefaults,
+		githubToken:  cfg.GitHubToken,
 		sessions:     make(map[string]*session),
 		pendingJobs:  make(chan *jobEnvelope, 100),
 		activeJobs:   make(map[string]*jobEnvelope),
 		requestToJob:      make(map[int64]string),
 		messageToJob:      make(map[int64]string),
 		completedRequests: make(map[int64]string),
-		timelines:    make(map[string][]TimelineRecord),
+		timelines:     make(map[string][]TimelineRecord),
+		timelineToJob: make(map[string]string),
 		logs:        make(map[string]map[int][]string),
 		logNextID:   make(map[string]int),
 	}
@@ -244,6 +261,13 @@ func (s *Server) EnqueueJob(msg *AgentJobRequestMessage) <-chan *JobCompletionRe
 	}
 	s.pendingJobs <- env
 	return env.result
+}
+
+// OnStepUpdate sets a callback that's invoked when the runner reports step status changes.
+func (s *Server) OnStepUpdate(cb func(jobID, stepName, state string, result *string)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.stepCallback = cb
 }
 
 // RequestLog returns a copy of the request log.
@@ -684,6 +708,9 @@ func (s *Server) handleGetMessage(w http.ResponseWriter, r *http.Request) {
 		s.activeJobs[env.msg.JobID] = env
 		s.requestToJob[env.msg.RequestID] = env.msg.JobID
 		s.messageToJob[msgID] = env.msg.JobID
+		if env.msg.Timeline != nil {
+			s.timelineToJob[env.msg.Timeline.ID] = env.msg.JobID
+		}
 		if sess != nil {
 			sess.hasJob = true
 		}
@@ -824,7 +851,18 @@ func (s *Server) handleUpdateTimeline(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	s.timelines[timelineID] = existing
+	jobID := s.timelineToJob[timelineID]
+	cb := s.stepCallback
 	s.mu.Unlock()
+
+	// Notify the orchestrator of step status changes.
+	if cb != nil && jobID != "" {
+		for _, rec := range records {
+			if rec.Name != "" {
+				cb(jobID, rec.Name, rec.State, rec.Result)
+			}
+		}
+	}
 
 	writeJSON(w, http.StatusOK, records)
 }

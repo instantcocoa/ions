@@ -1,0 +1,41 @@
+name: Container Job Test
+on: push
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    container:
+      image: node:20
+      env:
+        NODE_ENV: test
+    steps:
+      - name: Check Node version
+        run: node --version
+      - name: Check environment
+        run: echo "NODE_ENV=$NODE_ENV"
+
+  test-with-services:
+    runs-on: ubuntu-latest
+    container:
+      image: node:20
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+      redis:
+        image: redis:7
+    steps:
+      - name: Check connectivity
+        run: |
+          echo "Testing from inside container"
+          node --version
+
+  test-simple-container:
+    runs-on: ubuntu-latest
+    container: node:20
+    steps:
+      - name: Check Node
+        run: node --version

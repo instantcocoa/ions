@@ -4,14 +4,18 @@ import (
 	"archive/tar"
 	"compress/gzip"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 )
 
 // Manager handles downloading, installing, and version management of the
@@ -23,9 +27,12 @@ type Manager struct {
 
 // Config stores the installed runner configuration.
 type Config struct {
-	InstalledVersion string `json:"installed_version"`
-	Platform         string `json:"platform"`
-	Architecture     string `json:"architecture"`
+	InstalledVersion string    `json:"installed_version"`
+	Platform         string    `json:"platform"`
+	Architecture     string    `json:"architecture"`
+	SHA256           string    `json:"sha256,omitempty"`         // hex-encoded SHA-256 of the downloaded archive
+	LastUpdateCheck  time.Time `json:"last_update_check,omitempty"` // when we last checked for updates
+	LatestKnown      string    `json:"latest_known,omitempty"`     // latest version from last check
 }
 
 // githubRelease is the subset of GitHub's release API response we need.
@@ -75,12 +82,16 @@ func (m *Manager) configPath() string {
 }
 
 // EnsureInstalled checks if a runner is installed and installs the latest if not.
-// Returns the path to the runner directory.
+// Returns the path to the runner directory. If a runner is already installed,
+// it periodically checks for updates (at most once per 24 hours) and logs a
+// message if a newer version is available.
 func (m *Manager) EnsureInstalled(ctx context.Context) (string, error) {
 	ver, err := m.InstalledVersion()
 	if err == nil && ver != "" {
 		dir := m.VersionDir(ver)
 		if _, statErr := os.Stat(dir); statErr == nil {
+			// Runner is installed. Check for updates in the background.
+			m.checkForUpdateAsync(ctx, ver)
 			return dir, nil
 		}
 	}
@@ -96,7 +107,46 @@ func (m *Manager) EnsureInstalled(ctx context.Context) (string, error) {
 	return m.VersionDir(latest), nil
 }
 
+// checkForUpdateAsync checks for a newer runner version without blocking.
+// Only checks at most once per 24 hours to avoid API rate limits.
+func (m *Manager) checkForUpdateAsync(ctx context.Context, currentVersion string) {
+	cfg, err := m.loadConfig()
+	if err != nil {
+		return
+	}
+
+	// Don't check more than once per day.
+	if !cfg.LastUpdateCheck.IsZero() && time.Since(cfg.LastUpdateCheck) < 24*time.Hour {
+		// If we already know about a newer version, log it.
+		if cfg.LatestKnown != "" && cfg.LatestKnown != currentVersion {
+			log.Printf("[runner] Update available: v%s (installed: v%s). Run 'ions runner install --latest' to update.", cfg.LatestKnown, currentVersion)
+		}
+		return
+	}
+
+	go func() {
+		checkCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		defer cancel()
+
+		latest, err := m.LatestVersion(checkCtx)
+		if err != nil {
+			return // silently ignore — don't block the workflow
+		}
+
+		cfg.LastUpdateCheck = time.Now()
+		cfg.LatestKnown = latest
+		m.saveConfig(cfg)
+
+		if latest != currentVersion {
+			log.Printf("[runner] Update available: v%s (installed: v%s). Run 'ions runner install --latest' to update.", latest, currentVersion)
+		}
+	}()
+}
+
 // Install downloads and extracts a specific runner version.
+// The archive's SHA-256 checksum is computed during download and stored in
+// the config file. If the same version is re-installed, the new checksum
+// is compared against the stored one to detect tampering.
 func (m *Manager) Install(ctx context.Context, version string) error {
 	version = strings.TrimPrefix(version, "v")
 
@@ -131,10 +181,27 @@ func (m *Manager) Install(ctx context.Context, version string) error {
 		return fmt.Errorf("cannot create version directory: %w", err)
 	}
 
-	if err := extractTarGz(resp.Body, dir); err != nil {
+	// Compute SHA-256 of the archive while extracting.
+	h := sha256.New()
+	body := io.TeeReader(resp.Body, h)
+
+	if err := extractTarGz(body, dir); err != nil {
 		// Clean up partial extraction.
 		os.RemoveAll(dir)
 		return fmt.Errorf("extraction failed: %w", err)
+	}
+
+	checksum := hex.EncodeToString(h.Sum(nil))
+	log.Printf("[runner] Downloaded %s (SHA-256: %s)", url, checksum)
+
+	// If we have a stored checksum for this version, verify it matches.
+	if existing, err := m.loadConfig(); err == nil && existing.SHA256 != "" &&
+		existing.InstalledVersion == version {
+		if existing.SHA256 != checksum {
+			os.RemoveAll(dir)
+			return fmt.Errorf("checksum mismatch for runner %s: expected %s, got %s",
+				version, existing.SHA256, checksum)
+		}
 	}
 
 	// Make runner scripts executable.
@@ -154,6 +221,7 @@ func (m *Manager) Install(ctx context.Context, version string) error {
 		InstalledVersion: version,
 		Platform:         platformString(),
 		Architecture:     archString(),
+		SHA256:           checksum,
 	})
 }
 

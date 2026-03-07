@@ -238,6 +238,41 @@ func TestGitHubContext_NoRemote(t *testing.T) {
 	// But should still read SHA and ref from the repo
 	assert.NotEmpty(t, getField(t, ctx, "sha").StringVal())
 	assert.NotEmpty(t, getField(t, ctx, "ref").StringVal())
+
+	// Without an APIBaseURL, server_url stays as github.com
+	assert.Equal(t, "https://github.com", getField(t, ctx, "server_url").StringVal())
+}
+
+func TestGitHubContext_NoRemoteWithBroker(t *testing.T) {
+	repoPath := createTestRepo(t, "") // no remote URL
+
+	opts := BuilderOptions{
+		RepoPath:   repoPath,
+		APIBaseURL: "http://localhost:12345/api/v3",
+	}
+
+	ctx := GitHubContext(opts)
+
+	// With no remote and an API base URL, server_url should point at
+	// the broker so actions/checkout hits the local stub instead of
+	// trying to clone from github.com/local/repo.
+	assert.Equal(t, "http://localhost:12345", getField(t, ctx, "server_url").StringVal())
+	assert.Equal(t, "http://localhost:12345/api/v3", getField(t, ctx, "api_url").StringVal())
+}
+
+func TestGitHubContext_WithRemoteAndBroker(t *testing.T) {
+	repoPath := createTestRepo(t, "https://github.com/real/repo.git")
+
+	opts := BuilderOptions{
+		RepoPath:   repoPath,
+		APIBaseURL: "http://localhost:12345/api/v3",
+	}
+
+	ctx := GitHubContext(opts)
+
+	// With a real remote, server_url stays as github.com even when
+	// a broker is available — checkout can reach github.com.
+	assert.Equal(t, "https://github.com", getField(t, ctx, "server_url").StringVal())
 }
 
 // --- parseRemoteURL tests ---
@@ -862,6 +897,54 @@ func TestFullContext_WithPopulatedOptions(t *testing.T) {
 	varsCtx, ok := ctx.Lookup("vars")
 	assert.True(t, ok)
 	assert.Equal(t, "prod", getField(t, varsCtx, "DEPLOY_ENV").StringVal())
+}
+
+// --- StrategyContext tests ---
+
+func TestStrategyContext_Defaults(t *testing.T) {
+	ctx := StrategyContext(BuilderOptions{})
+	require.Equal(t, expression.KindObject, ctx.Kind())
+
+	assert.Equal(t, true, getField(t, ctx, "fail-fast").BoolVal())
+	assert.Equal(t, float64(0), getField(t, ctx, "job-index").NumberVal())
+	assert.Equal(t, float64(0), getField(t, ctx, "job-total").NumberVal())
+	assert.Equal(t, float64(0), getField(t, ctx, "max-parallel").NumberVal())
+}
+
+func TestStrategyContext_WithValues(t *testing.T) {
+	ff := false
+	mp := 2
+	ctx := StrategyContext(BuilderOptions{
+		FailFast:    &ff,
+		JobIndex:    1,
+		JobTotal:    3,
+		MaxParallel: &mp,
+	})
+
+	assert.Equal(t, false, getField(t, ctx, "fail-fast").BoolVal())
+	assert.Equal(t, float64(1), getField(t, ctx, "job-index").NumberVal())
+	assert.Equal(t, float64(3), getField(t, ctx, "job-total").NumberVal())
+	assert.Equal(t, float64(2), getField(t, ctx, "max-parallel").NumberVal())
+}
+
+func TestStrategyContext_MaxParallelDefaultsToJobTotal(t *testing.T) {
+	ctx := StrategyContext(BuilderOptions{
+		JobTotal: 5,
+	})
+	assert.Equal(t, float64(5), getField(t, ctx, "max-parallel").NumberVal())
+}
+
+// --- JobContext tests ---
+
+func TestJobContext_Default(t *testing.T) {
+	ctx := JobContext(BuilderOptions{})
+	require.Equal(t, expression.KindObject, ctx.Kind())
+	assert.Equal(t, "success", getField(t, ctx, "status").StringVal())
+}
+
+func TestJobContext_WithStatus(t *testing.T) {
+	ctx := JobContext(BuilderOptions{JobStatus: "failure"})
+	assert.Equal(t, "failure", getField(t, ctx, "status").StringVal())
 }
 
 func TestFullContext_CaseInsensitiveLookup(t *testing.T) {

@@ -7,6 +7,28 @@ import (
 	"github.com/emaland/ions/internal/expression"
 )
 
+// needsRuntimeEval returns true if a job's if: condition references data
+// that is only available at runtime (needs context, status functions that
+// inspect dependency results). These conditions are deferred to execution
+// time rather than evaluated at plan time.
+func needsRuntimeEval(ifCond string) bool {
+	if ifCond == "" {
+		return false
+	}
+	// References to the needs context.
+	if strings.Contains(ifCond, "needs.") {
+		return true
+	}
+	// Status functions that depend on dependency results.
+	// Note: always() is NOT deferred — it always evaluates to true.
+	for _, fn := range []string{"failure()", "success()", "cancelled()"} {
+		if strings.Contains(ifCond, fn) {
+			return true
+		}
+	}
+	return false
+}
+
 // ParallelGroup is a set of jobs that can run concurrently.
 type ParallelGroup struct {
 	Nodes []*JobNode
@@ -73,15 +95,38 @@ func (g *Graph) ParallelGroups() ([]ParallelGroup, error) {
 	return groups, nil
 }
 
+// PlanOptions configures expression evaluation during planning.
+type PlanOptions struct {
+	// Functions overrides the default built-in function map for expression evaluation.
+	// When set, hashFiles() etc. can use real file-system access.
+	Functions map[string]expression.Function
+}
+
 // Plan produces an ExecutionPlan by:
 // 1. Computing parallel groups
 // 2. Evaluating job-level if: conditions (using the expression evaluator)
 // 3. Moving skipped jobs to Skipped list
 // Jobs whose dependencies were skipped are also skipped (unless they have always() in their if:)
-func (g *Graph) Plan(ctx expression.Context) (*ExecutionPlan, error) {
+func (g *Graph) Plan(ctx expression.Context, opts ...PlanOptions) (*ExecutionPlan, error) {
 	groups, err := g.ParallelGroups()
 	if err != nil {
 		return nil, err
+	}
+
+	// Merge options.
+	var fns map[string]expression.Function
+	for _, o := range opts {
+		if o.Functions != nil {
+			fns = o.Functions
+		}
+	}
+
+	// evalExpr evaluates a condition using custom functions if provided.
+	evalExpr := func(input string) (expression.Value, error) {
+		if fns != nil {
+			return expression.EvalExpressionWithFunctions(input, ctx, fns)
+		}
+		return expression.EvalExpression(input, ctx)
 	}
 
 	plan := &ExecutionPlan{}
@@ -110,9 +155,14 @@ func (g *Graph) Plan(ctx expression.Context) (*ExecutionPlan, error) {
 				}
 			}
 
-			// If not already skipped by dependency, evaluate the if: condition.
-			if !skip && node.Job.If != "" {
-				result, evalErr := expression.EvalExpression(node.Job.If, ctx)
+			// If the condition references runtime data (needs, failure(), etc.),
+			// defer evaluation to execution time.
+			if !skip && node.Job.If != "" && needsRuntimeEval(node.Job.If) {
+				node.NeedsRuntimeEval = true
+				// Include in plan — the orchestrator will evaluate at runtime.
+			} else if !skip && node.Job.If != "" {
+				// Static condition — evaluate at plan time.
+				result, evalErr := evalExpr(node.Job.If)
 				if evalErr != nil {
 					// If the expression fails to evaluate, skip the job.
 					skip = true

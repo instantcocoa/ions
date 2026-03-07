@@ -1,0 +1,21 @@
+name: Docker Action Test
+on: push
+
+jobs:
+  docker-hello:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run Alpine container action
+        uses: docker://alpine:3.19
+        with:
+          args: echo "Hello from Docker action"
+
+  docker-with-env:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Docker action with env
+        uses: docker://alpine:3.19
+        env:
+          MY_VAR: test-value
+        with:
+          args: sh -c 'echo "MY_VAR=$MY_VAR"'

@@ -1,0 +1,30 @@
+name: Fail Fast Test
+
+on: push
+
+jobs:
+  test-fail-fast-true:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: true
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - run: echo "Testing on ${{ matrix.os }}"
+
+  test-fail-fast-false:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - run: echo "Testing on ${{ matrix.os }}"
+
+  test-fail-fast-default:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node: [16, 18, 20]
+    steps:
+      - run: echo "Node ${{ matrix.node }}"

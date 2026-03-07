@@ -274,3 +274,36 @@ func EvalExpression(input string, ctx Context) (Value, error) {
 	eval := NewEvaluator(ctx)
 	return eval.Eval(node)
 }
+
+// EvalExpressionWithFunctions is like EvalExpression but uses a custom functions map.
+func EvalExpressionWithFunctions(input string, ctx Context, fns map[string]Function) (Value, error) {
+	node, err := Parse(input)
+	if err != nil {
+		return Null(), fmt.Errorf("parse error: %w", err)
+	}
+	eval := &Evaluator{
+		Context:   ctx,
+		Functions: fns,
+		JobStatus: "success",
+	}
+	return eval.Eval(node)
+}
+
+// EvalExpressionWithStatus is like EvalExpressionWithFunctions but also sets
+// the job status context for success(), failure(), and cancelled() functions.
+// The jobStatus should be derived from dependency results:
+//   - "success" if all dependencies succeeded
+//   - "failure" if any dependency failed
+//   - "cancelled" if any dependency was cancelled
+func EvalExpressionWithStatus(input string, ctx Context, fns map[string]Function, jobStatus string) (Value, error) {
+	node, err := Parse(input)
+	if err != nil {
+		return Null(), fmt.Errorf("parse error: %w", err)
+	}
+	eval := &Evaluator{
+		Context:   ctx,
+		Functions: fns,
+		JobStatus: jobStatus,
+	}
+	return eval.Eval(node)
+}

@@ -115,6 +115,26 @@ type DispatchInput struct {
 	Options     []string `yaml:"options"`
 }
 
+// WorkflowCallInputs returns the input definitions from the workflow_call trigger,
+// or nil if this workflow doesn't have a workflow_call trigger.
+func (t *Triggers) WorkflowCallInputs() map[string]DispatchInput {
+	ec, ok := t.Events["workflow_call"]
+	if !ok || ec == nil {
+		return nil
+	}
+	return ec.Inputs
+}
+
+// WorkflowCallOutputs returns the output definitions from the workflow_call trigger,
+// or nil if this workflow doesn't have a workflow_call trigger.
+func (t *Triggers) WorkflowCallOutputs() map[string]OutputDef {
+	ec, ok := t.Events["workflow_call"]
+	if !ok || ec == nil {
+		return nil
+	}
+	return ec.Outputs
+}
+
 // SecretDef represents a secret definition for workflow_call.
 type SecretDef struct {
 	Description string `yaml:"description"`

@@ -1,0 +1,29 @@
+name: Called Workflow
+on:
+  workflow_call:
+    inputs:
+      greeting:
+        description: The greeting message
+        required: true
+        type: string
+      target:
+        description: Who to greet
+        type: string
+        default: World
+    outputs:
+      message:
+        description: The full greeting
+        value: ${{ jobs.greet.outputs.full_message }}
+    secrets:
+      API_KEY:
+        required: false
+
+jobs:
+  greet:
+    runs-on: ubuntu-latest
+    outputs:
+      full_message: ${{ steps.build.outputs.msg }}
+    steps:
+      - id: build
+        run: echo "msg=${{ inputs.greeting }}, ${{ inputs.target }}!" >> "$GITHUB_OUTPUT"
+      - run: echo "${{ steps.build.outputs.msg }}"

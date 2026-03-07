@@ -343,6 +343,51 @@ func TestBuild_NonMatrixDependsOnMatrixJob(t *testing.T) {
 	assert.Len(t, deployNode.DependsOn, 2)
 }
 
+func TestBuild_MatrixJobIndexAndTotal(t *testing.T) {
+	w := makeWorkflow(map[string]*workflow.Job{
+		"test": {
+			Strategy: &workflow.Strategy{
+				Matrix: &workflow.Matrix{
+					Dimensions: map[string][]interface{}{
+						"os": {"ubuntu", "windows", "macos"},
+					},
+				},
+			},
+			Steps: []workflow.Step{{Run: "echo test"}},
+		},
+	})
+	g, err := Build(w)
+	require.NoError(t, err)
+
+	nodes := g.NodesByJobID("test")
+	require.Len(t, nodes, 3)
+
+	for _, node := range nodes {
+		assert.Equal(t, 3, node.JobTotal, "all nodes should have JobTotal=3")
+		assert.GreaterOrEqual(t, node.JobIndex, 0)
+		assert.Less(t, node.JobIndex, 3)
+	}
+
+	// Each node should have a unique JobIndex.
+	indices := map[int]bool{}
+	for _, node := range nodes {
+		indices[node.JobIndex] = true
+	}
+	assert.Len(t, indices, 3, "all indices should be unique")
+}
+
+func TestBuild_NonMatrixJobIndexAndTotal(t *testing.T) {
+	w := makeWorkflow(map[string]*workflow.Job{
+		"build": {Steps: []workflow.Step{{Run: "echo build"}}},
+	})
+	g, err := Build(w)
+	require.NoError(t, err)
+
+	node := g.Nodes["build"]
+	assert.Equal(t, 0, node.JobIndex)
+	assert.Equal(t, 1, node.JobTotal)
+}
+
 func TestBuild_MatrixNodeIDFormat(t *testing.T) {
 	w := makeWorkflow(map[string]*workflow.Job{
 		"test": {
@@ -764,6 +809,324 @@ func TestPlan_MatrixJobWithIf(t *testing.T) {
 	// Both matrix nodes should be skipped.
 	assert.Len(t, plan.Skipped, 2)
 	assert.Len(t, plan.Groups, 0)
+}
+
+// ---------------------------------------------------------------------------
+// Runtime evaluation deferral tests
+// ---------------------------------------------------------------------------
+
+func TestPlan_DeferredRuntimeEval_NeedsRef(t *testing.T) {
+	w := makeWorkflow(map[string]*workflow.Job{
+		"build": {Steps: []workflow.Step{{Run: "echo build"}}},
+		"deploy": {
+			Needs: workflow.StringOrSlice{"build"},
+			If:    "needs.build.result == 'success'",
+			Steps: []workflow.Step{{Run: "echo deploy"}},
+		},
+	})
+	g, err := Build(w)
+	require.NoError(t, err)
+
+	plan, err := g.Plan(expression.MapContext{})
+	require.NoError(t, err)
+
+	// deploy should NOT be skipped — it should be deferred to runtime.
+	assert.Len(t, plan.Skipped, 0)
+	assert.Len(t, plan.Groups, 2)
+
+	// The deploy node should be marked for runtime evaluation.
+	deployNode := g.Nodes["deploy"]
+	assert.True(t, deployNode.NeedsRuntimeEval, "deploy should need runtime eval")
+}
+
+func TestPlan_DeferredRuntimeEval_Failure(t *testing.T) {
+	w := makeWorkflow(map[string]*workflow.Job{
+		"build": {Steps: []workflow.Step{{Run: "echo build"}}},
+		"cleanup": {
+			Needs: workflow.StringOrSlice{"build"},
+			If:    "failure()",
+			Steps: []workflow.Step{{Run: "echo cleanup"}},
+		},
+	})
+	g, err := Build(w)
+	require.NoError(t, err)
+
+	plan, err := g.Plan(expression.MapContext{})
+	require.NoError(t, err)
+
+	// cleanup should NOT be skipped at plan time — failure() needs runtime eval.
+	assert.Len(t, plan.Skipped, 0)
+
+	cleanupNode := g.Nodes["cleanup"]
+	assert.True(t, cleanupNode.NeedsRuntimeEval, "cleanup should need runtime eval")
+}
+
+func TestPlan_DeferredRuntimeEval_Success(t *testing.T) {
+	w := makeWorkflow(map[string]*workflow.Job{
+		"build": {Steps: []workflow.Step{{Run: "echo build"}}},
+		"deploy": {
+			Needs: workflow.StringOrSlice{"build"},
+			If:    "success()",
+			Steps: []workflow.Step{{Run: "echo deploy"}},
+		},
+	})
+	g, err := Build(w)
+	require.NoError(t, err)
+
+	plan, err := g.Plan(expression.MapContext{})
+	require.NoError(t, err)
+
+	assert.Len(t, plan.Skipped, 0)
+	deployNode := g.Nodes["deploy"]
+	assert.True(t, deployNode.NeedsRuntimeEval, "deploy with success() should need runtime eval")
+}
+
+func TestPlan_DeferredRuntimeEval_Cancelled(t *testing.T) {
+	w := makeWorkflow(map[string]*workflow.Job{
+		"build": {Steps: []workflow.Step{{Run: "echo build"}}},
+		"notify": {
+			Needs: workflow.StringOrSlice{"build"},
+			If:    "cancelled()",
+			Steps: []workflow.Step{{Run: "echo notify"}},
+		},
+	})
+	g, err := Build(w)
+	require.NoError(t, err)
+
+	plan, err := g.Plan(expression.MapContext{})
+	require.NoError(t, err)
+
+	assert.Len(t, plan.Skipped, 0)
+	notifyNode := g.Nodes["notify"]
+	assert.True(t, notifyNode.NeedsRuntimeEval, "notify with cancelled() should need runtime eval")
+}
+
+func TestPlan_AlwaysNotDeferred(t *testing.T) {
+	// always() evaluates to true at plan time — no deferral needed.
+	w := makeWorkflow(map[string]*workflow.Job{
+		"build": {Steps: []workflow.Step{{Run: "echo build"}}},
+		"cleanup": {
+			Needs: workflow.StringOrSlice{"build"},
+			If:    "always()",
+			Steps: []workflow.Step{{Run: "echo cleanup"}},
+		},
+	})
+	g, err := Build(w)
+	require.NoError(t, err)
+
+	plan, err := g.Plan(expression.MapContext{})
+	require.NoError(t, err)
+
+	assert.Len(t, plan.Skipped, 0)
+	cleanupNode := g.Nodes["cleanup"]
+	assert.False(t, cleanupNode.NeedsRuntimeEval, "always() should not be deferred")
+}
+
+func TestPlan_StaticFalseNotDeferred(t *testing.T) {
+	w := makeWorkflow(map[string]*workflow.Job{
+		"skip": {If: "false", Steps: []workflow.Step{{Run: "echo skip"}}},
+	})
+	g, err := Build(w)
+	require.NoError(t, err)
+
+	plan, err := g.Plan(expression.MapContext{})
+	require.NoError(t, err)
+
+	assert.Len(t, plan.Skipped, 1)
+	assert.Len(t, plan.Groups, 0)
+	assert.False(t, g.Nodes["skip"].NeedsRuntimeEval)
+}
+
+func TestPlan_CompoundConditionWithNeeds(t *testing.T) {
+	w := makeWorkflow(map[string]*workflow.Job{
+		"build": {Steps: []workflow.Step{{Run: "echo build"}}},
+		"deploy": {
+			Needs: workflow.StringOrSlice{"build"},
+			If:    "github.ref == 'refs/heads/main' && needs.build.result == 'success'",
+			Steps: []workflow.Step{{Run: "echo deploy"}},
+		},
+	})
+	g, err := Build(w)
+	require.NoError(t, err)
+
+	ctx := expression.MapContext{
+		"github": expression.Object(map[string]expression.Value{
+			"ref": expression.String("refs/heads/main"),
+		}),
+	}
+	plan, err := g.Plan(ctx)
+	require.NoError(t, err)
+
+	// Should be deferred because it references needs.
+	assert.Len(t, plan.Skipped, 0)
+	deployNode := g.Nodes["deploy"]
+	assert.True(t, deployNode.NeedsRuntimeEval)
+}
+
+func TestNeedsRuntimeEval(t *testing.T) {
+	tests := []struct {
+		name     string
+		ifCond   string
+		expected bool
+	}{
+		{"empty", "", false},
+		{"static true", "true", false},
+		{"static false", "false", false},
+		{"github ref", "github.ref == 'refs/heads/main'", false},
+		{"needs ref", "needs.build.result == 'success'", true},
+		{"failure()", "failure()", true},
+		{"success()", "success()", true},
+		{"cancelled()", "cancelled()", true},
+		{"always()", "always()", false},
+		{"compound with needs", "github.ref == 'main' && needs.build.result == 'success'", true},
+		{"failure() with always()", "failure() || always()", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.expected, needsRuntimeEval(tt.ifCond))
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Matrix edge cases — comboMatchesEntry, matchesOnKeys
+// ---------------------------------------------------------------------------
+
+func TestExpandMatrix_AllExcluded(t *testing.T) {
+	// All combos are excluded — should return nil.
+	m := &workflow.Matrix{
+		Dimensions: map[string][]interface{}{
+			"os": {"ubuntu"},
+		},
+		Exclude: []map[string]interface{}{
+			{"os": "ubuntu"},
+		},
+	}
+	combos := ExpandMatrix(m)
+	assert.Nil(t, combos)
+}
+
+func TestComboMatchesEntry_MissingKey(t *testing.T) {
+	combo := MatrixCombination{"os": "ubuntu"}
+	entry := map[string]any{"os": "ubuntu", "version": "20.04"}
+	// Combo doesn't have "version", so it shouldn't match.
+	assert.False(t, comboMatchesEntry(combo, entry))
+}
+
+func TestComboMatchesEntry_ValueMismatch(t *testing.T) {
+	combo := MatrixCombination{"os": "ubuntu", "version": "18.04"}
+	entry := map[string]any{"os": "ubuntu", "version": "20.04"}
+	assert.False(t, comboMatchesEntry(combo, entry))
+}
+
+func TestMatchesOnKeys_ValueMismatch(t *testing.T) {
+	combo := MatrixCombination{"os": "ubuntu"}
+	entry := map[string]any{"os": "windows"}
+	assert.False(t, matchesOnKeys(combo, entry, []string{"os"}))
+}
+
+func TestMatchesOnKeys_MissingKeyInCombo(t *testing.T) {
+	combo := MatrixCombination{}
+	entry := map[string]any{"os": "ubuntu"}
+	assert.False(t, matchesOnKeys(combo, entry, []string{"os"}))
+}
+
+func TestMatchesOnKeys_MissingKeyInEntry(t *testing.T) {
+	combo := MatrixCombination{"os": "ubuntu"}
+	entry := map[string]any{}
+	assert.False(t, matchesOnKeys(combo, entry, []string{"os"}))
+}
+
+func TestCartesianProduct_EmptyDims(t *testing.T) {
+	result := cartesianProduct(nil)
+	assert.Nil(t, result)
+}
+
+// ---------------------------------------------------------------------------
+// Plan — custom functions, static eval error, ParallelGroups error
+// ---------------------------------------------------------------------------
+
+func TestPlan_WithCustomFunctions(t *testing.T) {
+	g := &Graph{
+		Nodes: map[string]*JobNode{
+			"job1": {
+				NodeID:  "job1",
+				JobID:   "job1",
+				JobName: "build",
+				Job: &workflow.Job{
+					If: "custom_fn()",
+				},
+			},
+		},
+	}
+
+	customFns := expression.BuiltinFunctions()
+	customFns["custom_fn"] = func(args []expression.Value) (expression.Value, error) {
+		return expression.Bool(true), nil
+	}
+
+	plan, err := g.Plan(expression.MapContext{}, PlanOptions{Functions: customFns})
+	require.NoError(t, err)
+	require.NotNil(t, plan)
+	assert.Len(t, plan.Groups, 1)
+	assert.Len(t, plan.Groups[0].Nodes, 1)
+	assert.Empty(t, plan.Skipped)
+}
+
+func TestPlan_StaticEvalError(t *testing.T) {
+	g := &Graph{
+		Nodes: map[string]*JobNode{
+			"job1": {
+				NodeID:  "job1",
+				JobID:   "job1",
+				JobName: "build",
+				Job: &workflow.Job{
+					If: "invalid_expression(!!!",
+				},
+			},
+		},
+	}
+
+	plan, err := g.Plan(expression.MapContext{})
+	require.NoError(t, err)
+	require.NotNil(t, plan)
+	// Job should be skipped because expression evaluation failed.
+	assert.Empty(t, plan.Groups)
+	assert.Len(t, plan.Skipped, 1)
+}
+
+func TestPlan_StaticEvalFalse(t *testing.T) {
+	g := &Graph{
+		Nodes: map[string]*JobNode{
+			"job1": {
+				NodeID:  "job1",
+				JobID:   "job1",
+				JobName: "build",
+				Job: &workflow.Job{
+					If: "false",
+				},
+			},
+		},
+	}
+
+	plan, err := g.Plan(expression.MapContext{})
+	require.NoError(t, err)
+	require.NotNil(t, plan)
+	assert.Empty(t, plan.Groups)
+	assert.Len(t, plan.Skipped, 1)
+}
+
+func TestPlan_CircularDependency(t *testing.T) {
+	g := &Graph{
+		Nodes: map[string]*JobNode{
+			"a": {NodeID: "a", JobID: "a", JobName: "A", Job: &workflow.Job{}, DependsOn: []string{"b"}},
+			"b": {NodeID: "b", JobID: "b", JobName: "B", Job: &workflow.Job{}, DependsOn: []string{"a"}},
+		},
+	}
+
+	_, err := g.Plan(expression.MapContext{})
+	assert.Error(t, err)
 }
 
 // ---------------------------------------------------------------------------

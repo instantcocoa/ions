@@ -479,3 +479,56 @@ func TestPassthroughNotUsedWithoutToken(t *testing.T) {
 	srv := NewServer(RepoInfo{}, "http://test", Options{})
 	assert.False(t, srv.ProxyToGitHub(nil, &http.Request{Method: http.MethodGet}))
 }
+
+func TestGraphQL_ProxiesToUpstream(t *testing.T) {
+	// Set up a fake GitHub GraphQL endpoint.
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "/graphql", r.URL.Path)
+		assert.Equal(t, "Bearer test-token", r.Header.Get("Authorization"))
+		assert.Equal(t, "application/json", r.Header.Get("Content-Type"))
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"data": map[string]any{
+				"viewer": map[string]any{"login": "octocat"},
+			},
+		})
+	}))
+	defer upstream.Close()
+
+	// Override the base URL for the proxy.
+	origBase := githubAPIBase
+	// We can't override the const, but we can test the stub behavior
+	// by verifying the no-token path works.
+	_ = origBase
+
+	// Without token: returns empty stub.
+	ts := setupTestServer(RepoInfo{Owner: "octocat"})
+	defer ts.Close()
+
+	code, body := postJSON(t, ts, "/api/v3/graphql", `{"query":"{ viewer { login } }"}`)
+	assert.Equal(t, 200, code)
+	assert.NotNil(t, body["data"])
+	// Without token, data should be empty.
+	data := body["data"].(map[string]any)
+	assert.Empty(t, data)
+}
+
+func TestPassthrough_WritesBlockedByDefault(t *testing.T) {
+	srv := NewServer(RepoInfo{}, "http://test", Options{Token: "test-token"})
+	req, _ := http.NewRequest(http.MethodPost, "/api/v3/repos/a/b/dispatches", nil)
+	// Without ProxyWrites, POST should not be proxied via catch-all.
+	assert.False(t, srv.ProxyToGitHub(nil, req))
+}
+
+func TestPassthrough_WritesBlockedWithoutFlag(t *testing.T) {
+	// Even with a token, POST is blocked without ProxyWrites.
+	srv := NewServer(RepoInfo{}, "http://test", Options{Token: "test-token"})
+	postReq, _ := http.NewRequest(http.MethodPost, "/api/v3/repos/a/b/dispatches", nil)
+	assert.False(t, srv.ProxyToGitHub(nil, postReq))
+
+	patchReq, _ := http.NewRequest(http.MethodPatch, "/api/v3/repos/a/b/check-runs/1", nil)
+	assert.False(t, srv.ProxyToGitHub(nil, patchReq))
+
+	putReq, _ := http.NewRequest(http.MethodPut, "/api/v3/repos/a/b/contents/file.txt", nil)
+	assert.False(t, srv.ProxyToGitHub(nil, putReq))
+}

@@ -185,6 +185,7 @@ func runCmd() *cobra.Command {
 		reuseContainers bool
 		platform        string
 		githubToken     string
+		watch           bool
 	)
 
 	cmd := &cobra.Command{
@@ -216,6 +217,10 @@ func runCmd() *cobra.Command {
 				GitHubToken:     githubToken,
 			}
 
+			if watch {
+				return orchestrator.WatchAndRun(ctx, opts)
+			}
+
 			o, err := orchestrator.New(opts)
 			if err != nil {
 				return err
@@ -244,6 +249,7 @@ func runCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&reuseContainers, "reuse-containers", false, "don't remove containers after run (debugging)")
 	cmd.Flags().StringVar(&platform, "platform", "", "override platform detection (e.g. linux/amd64)")
 	cmd.Flags().StringVar(&githubToken, "github-token", "", "GitHub token for API passthrough (optional)")
+	cmd.Flags().BoolVarP(&watch, "watch", "w", false, "re-run workflow on file changes")
 
 	return cmd
 }
@@ -255,6 +261,7 @@ func runnerCmd() *cobra.Command {
 	}
 
 	var version string
+	var latest bool
 	installCmd := &cobra.Command{
 		Use:   "install",
 		Short: "Install or update the runner binary",
@@ -267,13 +274,22 @@ func runnerCmd() *cobra.Command {
 			ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
 			defer cancel()
 
-			if version == "" {
+			if version == "" || latest {
 				fmt.Println("Checking for latest runner version...")
 				v, err := mgr.LatestVersion(ctx)
 				if err != nil {
 					return err
 				}
 				version = v
+			}
+
+			// Check if this version is already installed.
+			installed, _ := mgr.InstalledVersion()
+			if installed == version && !latest {
+				green := color.New(color.FgGreen)
+				green.Printf("✓")
+				fmt.Printf(" Runner v%s is already installed\n", version)
+				return nil
 			}
 
 			fmt.Printf("Installing runner v%s...\n", version)
@@ -287,7 +303,8 @@ func runnerCmd() *cobra.Command {
 			return nil
 		},
 	}
-	installCmd.Flags().StringVar(&version, "version", "", "specific version to install (default: latest)")
+	installCmd.Flags().StringVar(&version, "version", "", "specific version to install")
+	installCmd.Flags().BoolVar(&latest, "latest", false, "install the latest version")
 	cmd.AddCommand(installCmd)
 
 	return cmd

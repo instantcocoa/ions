@@ -14,6 +14,8 @@ type Container struct {
 	Ports       []string          `yaml:"ports,omitempty"`
 	Volumes     []string          `yaml:"volumes,omitempty"`
 	Options     string            `yaml:"options,omitempty"`
+	Entrypoint  string            `yaml:"entrypoint,omitempty"`
+	Args        string            `yaml:"args,omitempty"`
 }
 
 // Credentials holds authentication for a container registry.

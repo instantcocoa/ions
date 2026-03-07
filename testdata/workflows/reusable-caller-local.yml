@@ -1,0 +1,16 @@
+name: Local Reusable Caller
+on: push
+
+jobs:
+  call-local:
+    uses: ./testdata/workflows/reusable-called.yml
+    with:
+      greeting: Hello
+      target: ions
+    secrets: inherit
+
+  use-output:
+    needs: call-local
+    runs-on: ubuntu-latest
+    steps:
+      - run: 'echo "Got message: ${{ needs.call-local.outputs.message }}"'
