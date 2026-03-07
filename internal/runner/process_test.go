@@ -179,7 +179,7 @@ func TestStartMissingScripts(t *testing.T) {
 	require.NoError(t, err)
 
 	err = p.Start(context.Background())
-	assert.ErrorContains(t, err, "neither run.sh nor bin/Runner.Listener found")
+	assert.ErrorContains(t, err, "neither bin/Runner.Listener nor run.sh found")
 }
 
 func TestStartFallbackToListener(t *testing.T) {

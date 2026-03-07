@@ -1,0 +1,24 @@
+FROM golang:1.25-bookworm
+
+# Install Docker CLI (for service container tests), libicu (for runner), and common tools.
+RUN apt-get update && \
+    apt-get install -y ca-certificates curl gnupg libicu72 && \
+    install -m 0755 -d /etc/apt/keyrings && \
+    curl -fsSL https://download.docker.com/linux/debian/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg && \
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/debian bookworm stable" > /etc/apt/sources.list.d/docker.list && \
+    apt-get update && \
+    apt-get install -y docker-ce-cli && \
+    rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+RUN go build ./cmd/ions/
+
+# Install the runner binary at build time so tests start faster.
+RUN ./ions runner install --latest
+
+ENV IONS_INTEGRATION=1
+ENTRYPOINT ["go", "test", "./internal/orchestrator/", "-run", "TestIntegration", "-v", "-count=1", "-parallel=1", "-timeout=30m"]

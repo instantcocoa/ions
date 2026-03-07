@@ -161,18 +161,19 @@ func (p *Process) Start(ctx context.Context) error {
 		return errors.New("runner process already started")
 	}
 
-	runScript := filepath.Join(p.runnerDir, "run.sh")
-	if _, err := os.Stat(runScript); err != nil {
-		// Fall back to bin/Runner.Listener.
-		runScript = filepath.Join(p.runnerDir, "bin", "Runner.Listener")
+	// Prefer bin/Runner.Listener directly — it's a self-contained binary
+	// and doesn't depend on /bin/bash being present (which NixOS lacks).
+	// Fall back to run.sh only if Runner.Listener doesn't exist.
+	runBin := filepath.Join(p.runnerDir, "bin", "Runner.Listener")
+	var cmd *exec.Cmd
+	if _, err := os.Stat(runBin); err == nil {
+		cmd = exec.CommandContext(ctx, runBin, "run")
+	} else {
+		runScript := filepath.Join(p.runnerDir, "run.sh")
 		if _, err := os.Stat(runScript); err != nil {
-			return fmt.Errorf("neither run.sh nor bin/Runner.Listener found in %s", p.runnerDir)
+			return fmt.Errorf("neither bin/Runner.Listener nor run.sh found in %s", p.runnerDir)
 		}
-	}
-
-	cmd := exec.CommandContext(ctx, runScript)
-	if filepath.Base(runScript) == "Runner.Listener" {
-		cmd.Args = append(cmd.Args, "run")
+		cmd = exec.CommandContext(ctx, runScript)
 	}
 	cmd.Dir = p.runnerDir
 	cmd.Env = append(os.Environ(), runnerEnvVars()...)

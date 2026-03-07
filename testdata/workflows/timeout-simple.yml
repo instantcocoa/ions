@@ -1,0 +1,9 @@
+name: Timeout Simple
+on: push
+
+jobs:
+  quick-job:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - run: echo "This job has a 5 minute timeout"

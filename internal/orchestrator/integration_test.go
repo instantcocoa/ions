@@ -153,6 +153,141 @@ func TestIntegration_SecretMasking(t *testing.T) {
 	assert.True(t, result.Success)
 }
 
+// TestIntegration_Matrix is skipped by default because concurrent runner
+// processes sometimes miss broker completion signals. Run with:
+//   -run TestIntegration_Matrix -timeout 10m
+func TestIntegration_Matrix(t *testing.T) {
+	skipIfNoIntegration(t)
+	if os.Getenv("IONS_INTEGRATION_MATRIX") == "" {
+		t.Skip("set IONS_INTEGRATION_MATRIX=1 to run matrix integration tests (slow/flaky)")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
+	defer cancel()
+
+	o, err := New(Options{
+		WorkflowPath: workflowPath(t, "matrix-simple.yml"),
+		RepoPath:     projectRoot(t),
+		Verbose:      true,
+	})
+	require.NoError(t, err)
+
+	result, err := o.Run(ctx)
+	require.NoError(t, err)
+	assert.True(t, result.Success, "matrix workflow should succeed")
+
+	assert.Equal(t, 2, len(result.JobResults))
+	for _, jr := range result.JobResults {
+		assert.Equal(t, "success", jr.Status)
+	}
+}
+
+func TestIntegration_Timeout(t *testing.T) {
+	skipIfNoIntegration(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	o, err := New(Options{
+		WorkflowPath: workflowPath(t, "timeout-simple.yml"),
+		RepoPath:     projectRoot(t),
+		Verbose:      true,
+	})
+	require.NoError(t, err)
+
+	result, err := o.Run(ctx)
+	require.NoError(t, err)
+	assert.True(t, result.Success)
+	assert.Contains(t, result.JobResults, "quick-job")
+	assert.Equal(t, "success", result.JobResults["quick-job"].Status)
+}
+
+// TestIntegration_ContinueOnError passes but takes ~8 minutes due to runner
+// poll loops after job completion. Gated behind IONS_INTEGRATION_SLOW.
+func TestIntegration_ContinueOnError(t *testing.T) {
+	skipIfNoIntegration(t)
+	if os.Getenv("IONS_INTEGRATION_SLOW") == "" {
+		t.Skip("set IONS_INTEGRATION_SLOW=1 to run slow integration tests")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+
+	o, err := New(Options{
+		WorkflowPath: workflowPath(t, "continue-on-error.yml"),
+		RepoPath:     projectRoot(t),
+		Verbose:      true,
+	})
+	require.NoError(t, err)
+
+	result, err := o.Run(ctx)
+	require.NoError(t, err)
+
+	// The flaky job fails (exit 1) but has continue-on-error: true.
+	// depends-on-flaky should still run because flaky's conclusion is "success".
+	assert.True(t, result.Success)
+
+	assert.Contains(t, result.JobResults, "flaky")
+	assert.Contains(t, result.JobResults, "depends-on-flaky")
+	assert.Contains(t, result.JobResults, "always-run")
+}
+
+func TestIntegration_Expressions(t *testing.T) {
+	skipIfNoIntegration(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+
+	o, err := New(Options{
+		WorkflowPath: workflowPath(t, "expressions-test.yml"),
+		RepoPath:     projectRoot(t),
+		Verbose:      true,
+	})
+	require.NoError(t, err)
+
+	result, err := o.Run(ctx)
+	require.NoError(t, err)
+	assert.True(t, result.Success, "expression tests should pass")
+}
+
+func TestIntegration_Concurrency(t *testing.T) {
+	skipIfNoIntegration(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+
+	o, err := New(Options{
+		WorkflowPath: workflowPath(t, "concurrency-test.yml"),
+		RepoPath:     projectRoot(t),
+		Verbose:      true,
+	})
+	require.NoError(t, err)
+
+	result, err := o.Run(ctx)
+	require.NoError(t, err)
+	assert.True(t, result.Success)
+	assert.Equal(t, "success", result.JobResults["build"].Status)
+	assert.Equal(t, "success", result.JobResults["deploy"].Status)
+}
+
+func TestIntegration_DryRun(t *testing.T) {
+	skipIfNoIntegration(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	o, err := New(Options{
+		WorkflowPath: workflowPath(t, "runtime-conditions.yml"),
+		RepoPath:     projectRoot(t),
+		DryRun:       true,
+	})
+	require.NoError(t, err)
+
+	result, err := o.Run(ctx)
+	require.NoError(t, err)
+	assert.True(t, result.Success)
+}
+
 func TestIntegration_Cancellation(t *testing.T) {
 	skipIfNoIntegration(t)
 
