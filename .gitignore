@@ -18,3 +18,10 @@
 
 # Coverage
 coverage.out
+
+# Working docs
+PLAN.md
+GITHUB_STUB.md
+
+# Letta
+.letta/
