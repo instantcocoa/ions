@@ -1025,11 +1025,15 @@ func copyDir(src, dst string) error {
 		}
 		rel, _ := filepath.Rel(src, path)
 
-		// Skip internal work directories and .git (runner doesn't need it,
-		// and .git can be large).
+		// Skip directories that are large, internal, or unnecessary for the runner.
 		if d.IsDir() {
+			base := filepath.Base(rel)
 			switch rel {
 			case ".ions-work", ".git", ".letta":
+				return filepath.SkipDir
+			}
+			switch base {
+			case "node_modules", "__pycache__", ".tox", ".mypy_cache", ".pytest_cache":
 				return filepath.SkipDir
 			}
 		}

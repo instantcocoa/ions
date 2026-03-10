@@ -2,9 +2,11 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -40,11 +42,15 @@ func main() {
 
 func validateCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "validate <workflow-file>",
+		Use:   "validate [workflow-file]",
 		Short: "Validate a workflow YAML file",
-		Args:  cobra.ExactArgs(1),
+		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			w, err := workflow.ParseFile(args[0])
+			path, err := resolveWorkflowPath(args)
+			if err != nil {
+				return err
+			}
+			w, err := workflow.ParseFile(path)
 			if err != nil {
 				return fmt.Errorf("parse error: %w", err)
 			}
@@ -53,7 +59,7 @@ func validateCmd() *cobra.Command {
 			if len(errs) == 0 {
 				green := color.New(color.FgGreen)
 				green.Printf("✓")
-				fmt.Printf(" %s is valid\n", args[0])
+				fmt.Printf(" %s is valid\n", path)
 				if verbose {
 					fmt.Printf("  name: %s\n", w.Name)
 					fmt.Printf("  jobs: %d\n", len(w.Jobs))
@@ -63,7 +69,7 @@ func validateCmd() *cobra.Command {
 
 			red := color.New(color.FgRed)
 			red.Printf("✗")
-			fmt.Printf(" %s has %d validation error(s):\n", args[0], len(errs))
+			fmt.Printf(" %s has %d validation error(s):\n", path, len(errs))
 			for _, e := range errs {
 				fmt.Printf("  - %s\n", e)
 			}
@@ -74,11 +80,15 @@ func validateCmd() *cobra.Command {
 
 func listCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "list <workflow-file>",
+		Use:   "list [workflow-file]",
 		Short: "List jobs in a workflow",
-		Args:  cobra.ExactArgs(1),
+		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			w, err := workflow.ParseFile(args[0])
+			path, err := resolveWorkflowPath(args)
+			if err != nil {
+				return err
+			}
+			w, err := workflow.ParseFile(path)
 			if err != nil {
 				return fmt.Errorf("parse error: %w", err)
 			}
@@ -181,6 +191,7 @@ func runCmd() *cobra.Command {
 		envVars         []string
 		inputs          []string
 		dryRun          bool
+		jsonOutput      bool
 		artifactDir     string
 		reuseContainers bool
 		platform        string
@@ -191,15 +202,25 @@ func runCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "run [workflow-file]",
 		Short: "Run a workflow locally",
+		Long: `Run a GitHub Actions workflow locally using the real runner binary.
+
+If no workflow file is given, discovers workflows in .github/workflows/
+and runs the first one found (or lists them if multiple exist).`,
 		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			workflowPath := ".github/workflows/ci.yml"
-			if len(args) > 0 {
-				workflowPath = args[0]
+			workflowPath, err := resolveWorkflowPath(args)
+			if err != nil {
+				return err
 			}
 
 			ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
 			defer cancel()
+
+			// Fall back to GITHUB_TOKEN env var if --github-token not set.
+			token := githubToken
+			if token == "" {
+				token = os.Getenv("GITHUB_TOKEN")
+			}
 
 			opts := orchestrator.Options{
 				WorkflowPath:    workflowPath,
@@ -214,7 +235,7 @@ func runCmd() *cobra.Command {
 				ArtifactDir:     artifactDir,
 				ReuseContainers: reuseContainers,
 				Platform:        platform,
-				GitHubToken:     githubToken,
+				GitHubToken:     token,
 			}
 
 			if watch {
@@ -229,6 +250,13 @@ func runCmd() *cobra.Command {
 			result, err := o.Run(ctx)
 			if err != nil {
 				return err
+			}
+
+			if jsonOutput {
+				out := jsonRunResult(result)
+				enc := json.NewEncoder(os.Stdout)
+				enc.SetIndent("", "  ")
+				return enc.Encode(out)
 			}
 
 			if !result.Success {
@@ -254,6 +282,7 @@ func runCmd() *cobra.Command {
 	cmd.Flags().StringSliceVar(&envVars, "env", nil, "environment KEY=VALUE (repeatable)")
 	cmd.Flags().StringSliceVar(&inputs, "input", nil, "input KEY=VALUE (repeatable)")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "print execution plan without running")
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "output results as JSON")
 	cmd.Flags().StringVar(&artifactDir, "artifact-dir", "", "override artifact storage location")
 	cmd.Flags().BoolVar(&reuseContainers, "reuse-containers", false, "don't remove containers after run (debugging)")
 	cmd.Flags().StringVar(&platform, "platform", "", "override platform detection (e.g. linux/amd64)")
@@ -347,6 +376,70 @@ func cleanCmd() *cobra.Command {
 			return nil
 		},
 	}
+}
+
+// jsonRunResult converts the orchestrator result to a JSON-friendly structure.
+func jsonRunResult(result *orchestrator.RunResult) map[string]interface{} {
+	jobs := make(map[string]interface{})
+	for name, jr := range result.JobResults {
+		job := map[string]interface{}{
+			"status":   jr.Status,
+			"duration": jr.Duration.String(),
+		}
+		if len(jr.Outputs) > 0 {
+			job["outputs"] = jr.Outputs
+		}
+		jobs[name] = job
+	}
+	return map[string]interface{}{
+		"success":  result.Success,
+		"duration": result.Duration.String(),
+		"jobs":     jobs,
+	}
+}
+
+// resolveWorkflowPath determines which workflow file to use.
+// If args contains an explicit path, use it. Otherwise, discover workflows
+// in .github/workflows/. If exactly one is found, use it. If multiple are
+// found, list them and ask the user to choose.
+func resolveWorkflowPath(args []string) (string, error) {
+	if len(args) > 0 {
+		return args[0], nil
+	}
+
+	dir := ".github/workflows"
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return "", fmt.Errorf("no workflow file specified and %s not found\nUsage: ions run <workflow-file>", dir)
+	}
+
+	var workflows []string
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		if strings.HasSuffix(name, ".yml") || strings.HasSuffix(name, ".yaml") {
+			workflows = append(workflows, filepath.Join(dir, name))
+		}
+	}
+
+	if len(workflows) == 0 {
+		return "", fmt.Errorf("no workflow files found in %s", dir)
+	}
+
+	if len(workflows) == 1 {
+		dim := color.New(color.Faint)
+		dim.Fprintf(os.Stderr, "Using %s\n", workflows[0])
+		return workflows[0], nil
+	}
+
+	// Multiple workflows — list them and ask user to pick.
+	fmt.Fprintf(os.Stderr, "Multiple workflows found in %s:\n", dir)
+	for i, w := range workflows {
+		fmt.Fprintf(os.Stderr, "  %d. %s\n", i+1, w)
+	}
+	return "", fmt.Errorf("specify which workflow to run: ions run <workflow-file>")
 }
 
 // parseKeyValues converts ["KEY=VALUE", ...] to map[string]string.
