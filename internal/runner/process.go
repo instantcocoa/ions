@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -177,6 +178,8 @@ func (p *Process) Start(ctx context.Context) error {
 	}
 	cmd.Dir = p.runnerDir
 	cmd.Env = append(os.Environ(), runnerEnvVars()...)
+	// Start in a new process group so we can kill all child processes at once.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -220,8 +223,8 @@ func (p *Process) Wait() error {
 	return <-done
 }
 
-// Stop gracefully shuts down the runner process.
-// Sends SIGINT first, waits up to 10 seconds, then sends SIGKILL.
+// Stop gracefully shuts down the runner process and all its children.
+// Sends SIGINT to the process group first, waits up to 5 seconds, then SIGKILL.
 func (p *Process) Stop() error {
 	p.mu.Lock()
 	cmd := p.cmd
@@ -232,22 +235,26 @@ func (p *Process) Stop() error {
 		return nil
 	}
 
-	// Send interrupt signal.
-	if err := cmd.Process.Signal(os.Interrupt); err != nil {
+	pid := cmd.Process.Pid
+
+	// Send SIGINT to the process group (negative PID).
+	if err := syscall.Kill(-pid, syscall.SIGINT); err != nil {
 		// Process may already be dead.
 		if cmd.ProcessState != nil && cmd.ProcessState.Exited() {
 			return nil
 		}
-		// If interrupt fails, try kill directly.
-		return cmd.Process.Kill()
 	}
 
-	// Wait up to 10 seconds for graceful shutdown.
+	// Wait up to 5 seconds for graceful shutdown.
 	select {
 	case <-done:
 		return nil
-	case <-time.After(10 * time.Second):
-		return cmd.Process.Kill()
+	case <-time.After(5 * time.Second):
+		// Kill the entire process group.
+		_ = syscall.Kill(-pid, syscall.SIGKILL)
+		// Also kill via Go API as fallback.
+		_ = cmd.Process.Kill()
+		return nil
 	}
 }
 

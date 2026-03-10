@@ -153,16 +153,10 @@ func TestIntegration_SecretMasking(t *testing.T) {
 	assert.True(t, result.Success)
 }
 
-// TestIntegration_Matrix is skipped by default because concurrent runner
-// processes sometimes miss broker completion signals. Run with:
-//   -run TestIntegration_Matrix -timeout 10m
 func TestIntegration_Matrix(t *testing.T) {
 	skipIfNoIntegration(t)
-	if os.Getenv("IONS_INTEGRATION_MATRIX") == "" {
-		t.Skip("set IONS_INTEGRATION_MATRIX=1 to run matrix integration tests (slow/flaky)")
-	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
 	o, err := New(Options{
@@ -202,15 +196,10 @@ func TestIntegration_Timeout(t *testing.T) {
 	assert.Equal(t, "success", result.JobResults["quick-job"].Status)
 }
 
-// TestIntegration_ContinueOnError passes but takes ~8 minutes due to runner
-// poll loops after job completion. Gated behind IONS_INTEGRATION_SLOW.
 func TestIntegration_ContinueOnError(t *testing.T) {
 	skipIfNoIntegration(t)
-	if os.Getenv("IONS_INTEGRATION_SLOW") == "" {
-		t.Skip("set IONS_INTEGRATION_SLOW=1 to run slow integration tests")
-	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
 	o, err := New(Options{
