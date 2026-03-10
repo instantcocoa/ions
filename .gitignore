@@ -23,5 +23,8 @@ coverage.out
 PLAN.md
 GITHUB_STUB.md
 
+# Secrets file (auto-loaded by ions run)
+.secrets
+
 # Letta
 .letta/

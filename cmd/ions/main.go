@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -187,8 +188,10 @@ func runCmd() *cobra.Command {
 		jobFilter       string
 		eventName       string
 		secrets         []string
+		secretFile      string
 		vars            []string
 		envVars         []string
+		envFile         string
 		inputs          []string
 		dryRun          bool
 		jsonOutput      bool
@@ -222,13 +225,32 @@ and runs the first one found (or lists them if multiple exist).`,
 				token = os.Getenv("GITHUB_TOKEN")
 			}
 
+			// Load env/secret files, then overlay CLI flags.
+			// Default: .env and .secrets; override with --env-file/--secret-file.
+			ef := ".env"
+			if envFile != "" {
+				ef = envFile
+			}
+			sf := ".secrets"
+			if secretFile != "" {
+				sf = secretFile
+			}
+			envMap := loadEnvFile(ef)
+			for k, v := range parseKeyValues(envVars) {
+				envMap[k] = v
+			}
+			secretMap := loadEnvFile(sf)
+			for k, v := range parseKeyValues(secrets) {
+				secretMap[k] = v
+			}
+
 			opts := orchestrator.Options{
 				WorkflowPath:    workflowPath,
 				JobFilter:       jobFilter,
 				EventName:       eventName,
-				Secrets:         parseKeyValues(secrets),
+				Secrets:         secretMap,
 				Vars:            parseKeyValues(vars),
-				Env:             parseKeyValues(envVars),
+				Env:             envMap,
 				Inputs:          parseKeyValues(inputs),
 				DryRun:          dryRun,
 				Verbose:         verbose,
@@ -278,8 +300,10 @@ and runs the first one found (or lists them if multiple exist).`,
 	cmd.Flags().StringVar(&jobFilter, "job", "", "run only this job")
 	cmd.Flags().StringVar(&eventName, "event", "push", "event name")
 	cmd.Flags().StringSliceVar(&secrets, "secret", nil, "secret KEY=VALUE (repeatable)")
+	cmd.Flags().StringVar(&secretFile, "secret-file", "", "load secrets from file (default: .secrets)")
 	cmd.Flags().StringSliceVar(&vars, "var", nil, "variable KEY=VALUE (repeatable)")
 	cmd.Flags().StringSliceVar(&envVars, "env", nil, "environment KEY=VALUE (repeatable)")
+	cmd.Flags().StringVar(&envFile, "env-file", "", "load env vars from file (default: .env)")
 	cmd.Flags().StringSliceVar(&inputs, "input", nil, "input KEY=VALUE (repeatable)")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "print execution plan without running")
 	cmd.Flags().BoolVar(&jsonOutput, "json", false, "output results as JSON")
@@ -440,6 +464,37 @@ func resolveWorkflowPath(args []string) (string, error) {
 		fmt.Fprintf(os.Stderr, "  %d. %s\n", i+1, w)
 	}
 	return "", fmt.Errorf("specify which workflow to run: ions run <workflow-file>")
+}
+
+// loadEnvFile reads a KEY=VALUE file (like .env or .secrets).
+// Empty lines, lines starting with #, and lines without = are skipped.
+// Returns an empty map if the file doesn't exist.
+func loadEnvFile(path string) map[string]string {
+	m := make(map[string]string)
+	f, err := os.Open(path)
+	if err != nil {
+		return m
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		k, v, ok := strings.Cut(line, "=")
+		if !ok {
+			continue
+		}
+		// Strip optional surrounding quotes from value.
+		v = strings.TrimSpace(v)
+		if len(v) >= 2 && ((v[0] == '"' && v[len(v)-1] == '"') || (v[0] == '\'' && v[len(v)-1] == '\'')) {
+			v = v[1 : len(v)-1]
+		}
+		m[strings.TrimSpace(k)] = v
+	}
+	return m
 }
 
 // parseKeyValues converts ["KEY=VALUE", ...] to map[string]string.
