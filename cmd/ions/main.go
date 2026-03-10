@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"sort"
@@ -35,6 +36,7 @@ func main() {
 	root.AddCommand(runCmd())
 	root.AddCommand(runnerCmd())
 	root.AddCommand(cleanCmd())
+	root.AddCommand(statusCmd())
 
 	if err := root.Execute(); err != nil {
 		os.Exit(1)
@@ -464,6 +466,94 @@ func resolveWorkflowPath(args []string) (string, error) {
 		fmt.Fprintf(os.Stderr, "  %d. %s\n", i+1, w)
 	}
 	return "", fmt.Errorf("specify which workflow to run: ions run <workflow-file>")
+}
+
+func statusCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "status",
+		Short: "Show ions environment status",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			bold := color.New(color.Bold)
+			green := color.New(color.FgGreen)
+			red := color.New(color.FgRed)
+			dim := color.New(color.Faint)
+
+			// Runner status.
+			bold.Println("Runner:")
+			mgr, err := runner.NewManager()
+			if err != nil {
+				red.Printf("  ✗")
+				fmt.Printf(" cannot initialize runner manager: %v\n", err)
+			} else {
+				ver, err := mgr.InstalledVersion()
+				if err != nil {
+					red.Printf("  ✗")
+					fmt.Println(" not installed")
+					fmt.Println("  Run: ions runner install --latest")
+				} else {
+					green.Printf("  ✓")
+					fmt.Printf(" v%s installed\n", ver)
+					dir := mgr.VersionDir(ver)
+					dim.Printf("    %s\n", dir)
+				}
+			}
+			fmt.Println()
+
+			// Workflows.
+			bold.Println("Workflows:")
+			dir := ".github/workflows"
+			entries, err := os.ReadDir(dir)
+			if err != nil {
+				dim.Printf("  No %s directory\n", dir)
+			} else {
+				count := 0
+				for _, e := range entries {
+					name := e.Name()
+					if !e.IsDir() && (strings.HasSuffix(name, ".yml") || strings.HasSuffix(name, ".yaml")) {
+						count++
+						path := filepath.Join(dir, name)
+						w, err := workflow.ParseFile(path)
+						if err != nil {
+							red.Printf("  ✗")
+							fmt.Printf(" %s (parse error)\n", path)
+						} else {
+							green.Printf("  ✓")
+							wName := w.Name
+							if wName == "" {
+								wName = name
+							}
+							fmt.Printf(" %s", path)
+							dim.Printf(" — %s (%d jobs)\n", wName, len(w.Jobs))
+						}
+					}
+				}
+				if count == 0 {
+					dim.Printf("  No workflow files in %s\n", dir)
+				}
+			}
+			fmt.Println()
+
+			// Docker.
+			bold.Println("Docker:")
+			if _, err := exec.LookPath("docker"); err != nil {
+				dim.Println("  Not available")
+			} else {
+				green.Printf("  ✓")
+				fmt.Println(" docker CLI available")
+			}
+
+			// .env / .secrets.
+			bold.Println("\nFiles:")
+			for _, f := range []string{".env", ".secrets"} {
+				if info, err := os.Stat(f); err == nil {
+					green.Printf("  ✓")
+					dim.Printf(" %s (%d bytes)\n", f, info.Size())
+				}
+			}
+
+			return nil
+		},
+	}
 }
 
 // loadEnvFile reads a KEY=VALUE file (like .env or .secrets).
