@@ -299,3 +299,83 @@ func TestIntegration_Cancellation(t *testing.T) {
 	// If it completed, it should have either succeeded or been cancelled.
 	assert.NotNil(t, result)
 }
+
+func TestIntegration_CompositeAction(t *testing.T) {
+	skipIfNoIntegration(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+
+	o, err := New(Options{
+		WorkflowPath: workflowPath(t, "composite-action.yml"),
+		RepoPath:     projectRoot(t),
+		Verbose:      true,
+	})
+	require.NoError(t, err)
+
+	result, err := o.Run(ctx)
+	require.NoError(t, err)
+	assert.True(t, result.Success, "composite action workflow should succeed")
+	assert.Contains(t, result.JobResults, "test-composite")
+	assert.Equal(t, "success", result.JobResults["test-composite"].Status)
+}
+
+func TestIntegration_StepOutputs(t *testing.T) {
+	skipIfNoIntegration(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+
+	o, err := New(Options{
+		WorkflowPath: workflowPath(t, "step-outputs-test.yml"),
+		RepoPath:     projectRoot(t),
+		Verbose:      true,
+	})
+	require.NoError(t, err)
+
+	result, err := o.Run(ctx)
+	require.NoError(t, err)
+	assert.True(t, result.Success, "step outputs workflow should succeed")
+}
+
+func TestIntegration_DockerAction(t *testing.T) {
+	skipIfNoIntegration(t)
+	if os.Getenv("IONS_INTEGRATION_DOCKER") == "" {
+		t.Skip("set IONS_INTEGRATION_DOCKER=1 to run Docker integration tests")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	o, err := New(Options{
+		WorkflowPath: workflowPath(t, "docker-action.yml"),
+		RepoPath:     projectRoot(t),
+		Verbose:      true,
+	})
+	require.NoError(t, err)
+
+	result, err := o.Run(ctx)
+	require.NoError(t, err)
+	assert.True(t, result.Success, "docker action workflow should succeed")
+}
+
+func TestIntegration_ServiceContainers(t *testing.T) {
+	skipIfNoIntegration(t)
+	if os.Getenv("IONS_INTEGRATION_DOCKER") == "" {
+		t.Skip("set IONS_INTEGRATION_DOCKER=1 to run Docker integration tests")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	o, err := New(Options{
+		WorkflowPath: workflowPath(t, "services-test.yml"),
+		RepoPath:     projectRoot(t),
+		Verbose:      true,
+	})
+	require.NoError(t, err)
+
+	result, err := o.Run(ctx)
+	require.NoError(t, err)
+	assert.True(t, result.Success, "service containers workflow should succeed")
+}

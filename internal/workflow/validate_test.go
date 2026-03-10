@@ -222,3 +222,151 @@ func TestValidate_StepIDsCanBeEmptyWithoutConflict(t *testing.T) {
 	errs := Validate(w)
 	assert.Empty(t, errs)
 }
+
+func TestValidate_SelfReference(t *testing.T) {
+	w := &Workflow{
+		Jobs: map[string]*Job{
+			"build": {
+				Needs: StringOrSlice{"build"},
+				Steps: []Step{{Run: "echo"}},
+			},
+		},
+	}
+	errs := Validate(w)
+	require.Len(t, errs, 1)
+	assert.Contains(t, errs[0].Error(), "cannot depend on itself")
+}
+
+func TestValidate_StepUsesFormat(t *testing.T) {
+	tests := []struct {
+		name    string
+		uses    string
+		wantErr bool
+		errMsg  string
+	}{
+		{"valid remote", "actions/checkout@v4", false, ""},
+		{"valid remote with path", "actions/aws/login@v1", false, ""},
+		{"valid local", "./my-action", false, ""},
+		{"valid docker", "docker://alpine:3.19", false, ""},
+		{"missing version", "actions/checkout", true, "missing @version"},
+		{"empty version", "actions/checkout@", true, "empty version"},
+		{"empty docker image", "docker://", true, "empty image"},
+		{"single segment", "checkout@v4", true, "must be owner/repo@ref"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			w := &Workflow{
+				Jobs: map[string]*Job{
+					"build": {
+						Steps: []Step{{Uses: tt.uses}},
+					},
+				},
+			}
+			errs := Validate(w)
+			if tt.wantErr {
+				found := false
+				for _, e := range errs {
+					if assert.ObjectsAreEqual(true, true) {
+						if contains(e.Error(), tt.errMsg) {
+							found = true
+						}
+					}
+				}
+				assert.True(t, found, "expected error containing %q, got %v", tt.errMsg, errs)
+			} else {
+				// Only check that there are no uses-related errors
+				for _, e := range errs {
+					assert.NotContains(t, e.Error(), "action")
+				}
+			}
+		})
+	}
+}
+
+func contains(s, sub string) bool {
+	return len(s) >= len(sub) && (s == sub || len(sub) == 0 || (len(s) > 0 && len(sub) > 0 && containsStr(s, sub)))
+}
+
+func containsStr(s, sub string) bool {
+	for i := 0; i <= len(s)-len(sub); i++ {
+		if s[i:i+len(sub)] == sub {
+			return true
+		}
+	}
+	return false
+}
+
+func TestValidate_ReusableWorkflowUsesFormat(t *testing.T) {
+	tests := []struct {
+		name    string
+		uses    string
+		wantErr bool
+		errMsg  string
+	}{
+		{"valid remote", "org/repo/.github/workflows/ci.yml@main", false, ""},
+		{"valid local", "./path/to/workflow.yml", false, ""},
+		{"local no extension", "./path/to/workflow", true, "must end in .yml or .yaml"},
+		{"remote missing ref", "org/repo/.github/workflows/ci.yml", true, "missing @ref"},
+		{"remote empty ref", "org/repo/.github/workflows/ci.yml@", true, "empty ref"},
+		{"remote wrong path depth", "org/ci.yml@main", true, "must be owner/repo/path@ref"},
+		{"remote no yml extension", "org/repo/.github/workflows/ci@main", true, "must end in .yml or .yaml"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			w := &Workflow{
+				Jobs: map[string]*Job{
+					"call": {Uses: tt.uses},
+				},
+			}
+			errs := Validate(w)
+			if tt.wantErr {
+				found := false
+				for _, e := range errs {
+					if containsStr(e.Error(), tt.errMsg) {
+						found = true
+					}
+				}
+				assert.True(t, found, "expected error containing %q, got %v", tt.errMsg, errs)
+			} else {
+				assert.Empty(t, errs)
+			}
+		})
+	}
+}
+
+func TestValidate_InvalidStepID(t *testing.T) {
+	w := &Workflow{
+		Jobs: map[string]*Job{
+			"build": {
+				Steps: []Step{
+					{ID: "123bad", Run: "echo"},
+				},
+			},
+		},
+	}
+	errs := Validate(w)
+	require.Len(t, errs, 1)
+	assert.Contains(t, errs[0].Error(), "not a valid identifier")
+}
+
+func TestValidate_EmptyMatrixDimension(t *testing.T) {
+	w := &Workflow{
+		Jobs: map[string]*Job{
+			"build": {
+				Strategy: &Strategy{
+					Matrix: &Matrix{
+						Dimensions: map[string][]interface{}{
+							"os": {},
+						},
+					},
+				},
+				Steps: []Step{{Run: "echo"}},
+			},
+		},
+	}
+	errs := Validate(w)
+	require.Len(t, errs, 1)
+	assert.Contains(t, errs[0].Error(), "has no values")
+}

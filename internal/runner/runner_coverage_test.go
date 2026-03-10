@@ -1727,13 +1727,13 @@ func TestStopKillAfterTimeout(t *testing.T) {
 	time.Sleep(1 * time.Second)
 	require.True(t, p.IsRunning(), "process should still be running after 1s")
 
-	// Stop will send SIGINT, wait 10s, then SIGKILL.
-	// This takes ~10 seconds. The process ignores SIGINT so the timeout fires.
+	// Stop will send SIGINT to process group, wait 5s, then SIGKILL.
+	// The process ignores SIGINT so the timeout fires.
 	start := time.Now()
 	err = p.Stop()
 	elapsed := time.Since(start)
-	// Should take at least ~9 seconds (the timeout with some slack).
-	assert.True(t, elapsed >= 9*time.Second, "Stop should have waited ~10s before killing, but only waited %s", elapsed)
+	// Should take at least ~4 seconds (the 5s timeout with some slack).
+	assert.True(t, elapsed >= 4*time.Second, "Stop should have waited ~5s before killing, but only waited %s", elapsed)
 	// The Kill should succeed (process dies).
 	_ = err
 }
@@ -2106,12 +2106,11 @@ func TestStopKillAfterSignalFails(t *testing.T) {
 	p.mu.Unlock()
 
 	// Now Stop should:
-	// 1. Signal(os.Interrupt) -> error "process already released"
-	// 2. ProcessState == nil (not exited)
-	// 3. Kill() -> also error "process already released"
+	// 1. syscall.Kill(-pid, SIGINT) -> may error since process was released
+	// 2. Fallthrough to 5s timeout, then SIGKILL
+	// 3. Return nil (Stop always returns nil now)
 	err = p.Stop()
-	// Kill returns an error since the process was released.
-	assert.Error(t, err)
+	assert.NoError(t, err)
 
 	// Clean up: the process is now orphaned. We can't kill it through Go.
 	// It will exit when the context is done or when the test cleans up.

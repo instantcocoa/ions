@@ -232,6 +232,15 @@ func runCmd() *cobra.Command {
 			}
 
 			if !result.Success {
+				var failedJobs []string
+				for name, jr := range result.JobResults {
+					if jr.Status == "failure" {
+						failedJobs = append(failedJobs, name)
+					}
+				}
+				if len(failedJobs) > 0 {
+					return fmt.Errorf("workflow failed: job(s) %s", strings.Join(failedJobs, ", "))
+				}
 				return fmt.Errorf("workflow failed")
 			}
 			return nil
