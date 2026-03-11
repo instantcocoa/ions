@@ -37,6 +37,7 @@ type Options struct {
 	Vars            map[string]string
 	Env             map[string]string
 	Inputs          map[string]string
+	EventPayload    map[string]any // custom event JSON for github.event
 	DryRun          bool
 	Verbose         bool
 	RepoPath        string
@@ -850,6 +851,7 @@ func (o *Orchestrator) buildContext(
 		Secrets:      o.opts.Secrets,
 		Vars:         o.opts.Vars,
 		Inputs:       o.opts.Inputs,
+		EventPayload: o.opts.EventPayload,
 		StepResults:  stepResults,
 		JobResults:   jobOutputs,
 		GitHubToken:  o.opts.GitHubToken,

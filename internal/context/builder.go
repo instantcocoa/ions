@@ -71,6 +71,10 @@ type BuilderOptions struct {
 
 	// GitHubToken overrides the default dummy token in github.token.
 	GitHubToken string
+
+	// EventPayload overrides the generated github.event with a custom value.
+	// When set, this replaces the auto-generated event payload entirely.
+	EventPayload map[string]any
 }
 
 // Builder constructs expression contexts.

@@ -149,9 +149,13 @@ func TestGitHubContext_WithRepo(t *testing.T) {
 	workspace := getField(t, ctx, "workspace").StringVal()
 	assert.NotEmpty(t, workspace)
 
-	// Check event is an empty object
+	// Check event is a pull_request event with proper fields
 	event := getField(t, ctx, "event")
 	assert.Equal(t, expression.KindObject, event.Kind())
+	eventFields := event.ObjectFields()
+	assert.Contains(t, eventFields, "pull_request")
+	assert.Contains(t, eventFields, "repository")
+	assert.Contains(t, eventFields, "sender")
 
 	// Check empty string fields
 	assert.Equal(t, "ions-dummy-token", getField(t, ctx, "token").StringVal())
@@ -957,4 +961,71 @@ func TestFullContext_CaseInsensitiveLookup(t *testing.T) {
 
 	_, ok = ctx.Lookup("Runner")
 	assert.True(t, ok, "should find 'Runner' case-insensitively")
+}
+
+func TestEventPayload_Push(t *testing.T) {
+	ctx := GitHubContext(BuilderOptions{EventName: "push"})
+	event := getField(t, ctx, "event")
+	fields := event.ObjectFields()
+
+	assert.Contains(t, fields, "ref")
+	assert.Contains(t, fields, "repository")
+	assert.Contains(t, fields, "sender")
+	assert.Contains(t, fields, "head_commit")
+
+	repo := fields["repository"].ObjectFields()
+	assert.Contains(t, repo, "full_name")
+	assert.Contains(t, repo, "owner")
+}
+
+func TestEventPayload_WorkflowDispatch(t *testing.T) {
+	ctx := GitHubContext(BuilderOptions{
+		EventName: "workflow_dispatch",
+		Inputs: map[string]string{
+			"environment": "staging",
+			"debug":       "true",
+		},
+	})
+	event := getField(t, ctx, "event")
+	fields := event.ObjectFields()
+
+	assert.Contains(t, fields, "inputs")
+	inputs := fields["inputs"].ObjectFields()
+	assert.Equal(t, "staging", inputs["environment"].StringVal())
+	assert.Equal(t, "true", inputs["debug"].StringVal())
+}
+
+func TestEventPayload_PullRequest(t *testing.T) {
+	ctx := GitHubContext(BuilderOptions{EventName: "pull_request"})
+	event := getField(t, ctx, "event")
+	fields := event.ObjectFields()
+
+	assert.Contains(t, fields, "pull_request")
+	assert.Contains(t, fields, "number")
+	assert.Contains(t, fields, "action")
+
+	pr := fields["pull_request"].ObjectFields()
+	assert.Contains(t, pr, "head")
+	assert.Contains(t, pr, "base")
+	assert.Contains(t, pr, "number")
+	assert.Equal(t, "open", pr["state"].StringVal())
+}
+
+func TestEventPayload_Schedule(t *testing.T) {
+	ctx := GitHubContext(BuilderOptions{EventName: "schedule"})
+	event := getField(t, ctx, "event")
+	fields := event.ObjectFields()
+
+	assert.Contains(t, fields, "schedule")
+	assert.Contains(t, fields, "repository")
+}
+
+func TestEventPayload_UnknownEvent(t *testing.T) {
+	ctx := GitHubContext(BuilderOptions{EventName: "release"})
+	event := getField(t, ctx, "event")
+	fields := event.ObjectFields()
+
+	// Unknown events still get common fields.
+	assert.Contains(t, fields, "repository")
+	assert.Contains(t, fields, "sender")
 }

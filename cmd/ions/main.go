@@ -197,6 +197,7 @@ func runCmd() *cobra.Command {
 		inputs          []string
 		dryRun          bool
 		jsonOutput      bool
+		eventPayload    string
 		artifactDir     string
 		reuseContainers bool
 		platform        string
@@ -246,6 +247,18 @@ and runs the first one found (or lists them if multiple exist).`,
 				secretMap[k] = v
 			}
 
+			// Load custom event payload if provided.
+			var eventData map[string]any
+			if eventPayload != "" {
+				data, readErr := os.ReadFile(eventPayload)
+				if readErr != nil {
+					return fmt.Errorf("reading event payload: %w", readErr)
+				}
+				if err := json.Unmarshal(data, &eventData); err != nil {
+					return fmt.Errorf("parsing event payload JSON: %w", err)
+				}
+			}
+
 			opts := orchestrator.Options{
 				WorkflowPath:    workflowPath,
 				JobFilter:       jobFilter,
@@ -254,6 +267,7 @@ and runs the first one found (or lists them if multiple exist).`,
 				Vars:            parseKeyValues(vars),
 				Env:             envMap,
 				Inputs:          parseKeyValues(inputs),
+				EventPayload:    eventData,
 				DryRun:          dryRun,
 				Verbose:         verbose,
 				ArtifactDir:     artifactDir,
@@ -309,6 +323,7 @@ and runs the first one found (or lists them if multiple exist).`,
 	cmd.Flags().StringSliceVar(&inputs, "input", nil, "input KEY=VALUE (repeatable)")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "print execution plan without running")
 	cmd.Flags().BoolVar(&jsonOutput, "json", false, "output results as JSON")
+	cmd.Flags().StringVar(&eventPayload, "event-payload", "", "path to JSON file with custom event payload for github.event")
 	cmd.Flags().StringVar(&artifactDir, "artifact-dir", "", "override artifact storage location")
 	cmd.Flags().BoolVar(&reuseContainers, "reuse-containers", false, "don't remove containers after run (debugging)")
 	cmd.Flags().StringVar(&platform, "platform", "", "override platform detection (e.g. linux/amd64)")

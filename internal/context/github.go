@@ -72,6 +72,13 @@ func GitHubContext(opts BuilderOptions) expression.Value {
 		serverURL = strings.TrimSuffix(opts.APIBaseURL, "/api/v3")
 	}
 
+	var event expression.Value
+	if opts.EventPayload != nil {
+		event = toExpressionValue(opts.EventPayload)
+	} else {
+		event = buildEventPayload(eventName, opts.Inputs, repository, repositoryOwner, ref, sha, actor, serverURL)
+	}
+
 	fields := map[string]expression.Value{
 		"event_name":        expression.String(eventName),
 		"workflow":          expression.String(opts.WorkflowName),
@@ -90,7 +97,7 @@ func GitHubContext(opts BuilderOptions) expression.Value {
 		"server_url":        expression.String(serverURL),
 		"api_url":           expression.String(apiURL(opts)),
 		"graphql_url":       expression.String(graphqlURL(opts)),
-		"event":             expression.Object(map[string]expression.Value{}),
+		"event":             event,
 		"token":             expression.String(tokenValue(opts)),
 		"job":               expression.String(""),
 		"action_path":       expression.String(""),
@@ -99,6 +106,110 @@ func GitHubContext(opts BuilderOptions) expression.Value {
 	}
 
 	return expression.Object(fields)
+}
+
+// buildEventPayload generates a realistic event payload based on the event type.
+// This populates github.event.* so workflows can reference event-specific fields.
+func buildEventPayload(eventName string, inputs map[string]string,
+	repository, repositoryOwner, ref, sha, actor, serverURL string) expression.Value {
+
+	repoObj := expression.Object(map[string]expression.Value{
+		"full_name":      expression.String(repository),
+		"name":           expression.String(repoName(repository)),
+		"owner":          expression.Object(map[string]expression.Value{"login": expression.String(repositoryOwner)}),
+		"default_branch": expression.String("main"),
+		"html_url":       expression.String(serverURL + "/" + repository),
+		"clone_url":      expression.String(serverURL + "/" + repository + ".git"),
+	})
+
+	senderObj := expression.Object(map[string]expression.Value{
+		"login": expression.String(actor),
+		"type":  expression.String("User"),
+	})
+
+	switch eventName {
+	case "push":
+		return expression.Object(map[string]expression.Value{
+			"ref":        expression.String(ref),
+			"before":     expression.String(strings.Repeat("0", 40)),
+			"after":      expression.String(sha),
+			"repository": repoObj,
+			"sender":     senderObj,
+			"head_commit": expression.Object(map[string]expression.Value{
+				"id":      expression.String(sha),
+				"message": expression.String("local commit"),
+				"author":  expression.Object(map[string]expression.Value{"name": expression.String(actor)}),
+			}),
+		})
+
+	case "pull_request", "pull_request_target":
+		return expression.Object(map[string]expression.Value{
+			"action": expression.String("opened"),
+			"number": expression.Number(1),
+			"pull_request": expression.Object(map[string]expression.Value{
+				"number": expression.Number(1),
+				"title":  expression.String("Local PR"),
+				"state":  expression.String("open"),
+				"merged": expression.Bool(false),
+				"draft":  expression.Bool(false),
+				"head": expression.Object(map[string]expression.Value{
+					"ref": expression.String(ref),
+					"sha": expression.String(sha),
+				}),
+				"base": expression.Object(map[string]expression.Value{
+					"ref": expression.String("main"),
+					"sha": expression.String(strings.Repeat("0", 40)),
+				}),
+				"user": senderObj,
+			}),
+			"repository": repoObj,
+			"sender":     senderObj,
+		})
+
+	case "workflow_dispatch":
+		inputFields := make(map[string]expression.Value, len(inputs))
+		for k, v := range inputs {
+			inputFields[k] = expression.String(v)
+		}
+		return expression.Object(map[string]expression.Value{
+			"inputs":     expression.Object(inputFields),
+			"ref":        expression.String(ref),
+			"repository": repoObj,
+			"sender":     senderObj,
+		})
+
+	case "schedule":
+		return expression.Object(map[string]expression.Value{
+			"schedule":   expression.String(""),
+			"repository": repoObj,
+			"sender":     senderObj,
+		})
+
+	case "workflow_call":
+		inputFields := make(map[string]expression.Value, len(inputs))
+		for k, v := range inputs {
+			inputFields[k] = expression.String(v)
+		}
+		return expression.Object(map[string]expression.Value{
+			"inputs": expression.Object(inputFields),
+		})
+
+	default:
+		// Generic event with common fields.
+		return expression.Object(map[string]expression.Value{
+			"repository": repoObj,
+			"sender":     senderObj,
+		})
+	}
+}
+
+// repoName extracts the repo name from "owner/repo".
+func repoName(fullName string) string {
+	parts := strings.SplitN(fullName, "/", 2)
+	if len(parts) == 2 {
+		return parts[1]
+	}
+	return fullName
 }
 
 // readGitActor tries to read the user.name from git config.
