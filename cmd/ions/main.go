@@ -195,6 +195,7 @@ func runCmd() *cobra.Command {
 		envVars         []string
 		envFile         string
 		inputs          []string
+		matrixFilter    []string
 		dryRun          bool
 		jsonOutput      bool
 		eventPayload    string
@@ -267,6 +268,7 @@ and runs the first one found (or lists them if multiple exist).`,
 				Vars:            parseKeyValues(vars),
 				Env:             envMap,
 				Inputs:          parseKeyValues(inputs),
+				MatrixFilter:    parseKeyValues(matrixFilter),
 				EventPayload:    eventData,
 				DryRun:          dryRun,
 				Verbose:         verbose,
@@ -321,6 +323,7 @@ and runs the first one found (or lists them if multiple exist).`,
 	cmd.Flags().StringSliceVar(&envVars, "env", nil, "environment KEY=VALUE (repeatable)")
 	cmd.Flags().StringVar(&envFile, "env-file", "", "load env vars from file (default: .env)")
 	cmd.Flags().StringSliceVar(&inputs, "input", nil, "input KEY=VALUE (repeatable)")
+	cmd.Flags().StringSliceVar(&matrixFilter, "matrix", nil, "filter matrix combinations KEY=VALUE (repeatable)")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "print execution plan without running")
 	cmd.Flags().BoolVar(&jsonOutput, "json", false, "output results as JSON")
 	cmd.Flags().StringVar(&eventPayload, "event-payload", "", "path to JSON file with custom event payload for github.event")

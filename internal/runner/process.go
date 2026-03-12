@@ -23,6 +23,7 @@ type ProcessConfig struct {
 	BrokerURL string // http://localhost:{port}
 	Name      string // runner name (default: "ions-runner")
 	WorkDir   string // working directory for jobs
+	ExtraEnv  []string // additional environment variables (KEY=VALUE format)
 }
 
 // Process manages a single runner process lifecycle.
@@ -38,6 +39,7 @@ type Process struct {
 	done         chan error
 	exited       bool
 	configLocked bool // true while we hold configMu
+	extraEnv     []string
 	mu           sync.Mutex
 }
 
@@ -61,6 +63,7 @@ func NewProcess(cfg ProcessConfig) (*Process, error) {
 		workDir:   cfg.WorkDir,
 		brokerURL: cfg.BrokerURL,
 		name:      cfg.Name,
+		extraEnv:  cfg.ExtraEnv,
 	}, nil
 }
 
@@ -178,6 +181,7 @@ func (p *Process) Start(ctx context.Context) error {
 	}
 	cmd.Dir = p.runnerDir
 	cmd.Env = append(os.Environ(), runnerEnvVars()...)
+	cmd.Env = append(cmd.Env, p.extraEnv...)
 	// Start in a new process group so we can kill all child processes at once.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 

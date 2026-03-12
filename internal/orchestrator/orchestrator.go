@@ -37,7 +37,8 @@ type Options struct {
 	Vars            map[string]string
 	Env             map[string]string
 	Inputs          map[string]string
-	EventPayload    map[string]any // custom event JSON for github.event
+	MatrixFilter    map[string]string // filter matrix combinations (e.g. os=ubuntu-latest)
+	EventPayload    map[string]any    // custom event JSON for github.event
 	DryRun          bool
 	Verbose         bool
 	RepoPath        string
@@ -122,30 +123,21 @@ func (o *Orchestrator) Run(ctx context.Context) (*RunResult, error) {
 		return nil, fmt.Errorf("workflow has %d validation error(s)", len(errs))
 	}
 
+	// Build initial context for planning.
+	runID := uuid.New().String()[:8]
+	initialCtx := o.buildContext(w, nil, nil, nil, runID)
+
 	// Display run-name if set (may contain ${{ }} expressions).
+	// Evaluated after initialCtx so it has access to github, env, inputs contexts.
 	if w.RunName != "" {
 		displayName := w.RunName
 		if strings.Contains(w.RunName, "${{") {
-			runNameCtx := o.buildContext(w, nil, nil, nil, "")
-			if val, evalErr := expression.EvalInterpolation(w.RunName, runNameCtx); evalErr == nil {
+			if val, evalErr := expression.EvalInterpolation(w.RunName, initialCtx); evalErr == nil {
 				displayName = val
 			}
 		}
 		fmt.Fprintf(os.Stdout, "Run: %s\n", displayName)
 	}
-
-	// Build graph.
-	g, err := graph.Build(w)
-	if err != nil {
-		return nil, fmt.Errorf("graph error: %w", err)
-	}
-	if err := g.Validate(); err != nil {
-		return nil, fmt.Errorf("graph error: %w", err)
-	}
-
-	// Build initial context for planning.
-	runID := uuid.New().String()[:8]
-	initialCtx := o.buildContext(w, nil, nil, nil, runID)
 
 	// Warn if the repo has no git remote — actions/checkout won't be able
 	// to clone, but the workspace is pre-populated so most workflows work.
@@ -161,6 +153,19 @@ func (o *Orchestrator) Run(ctx context.Context) (*RunResult, error) {
 	fns := expression.BuiltinFunctions()
 	expression.SetHashFilesWorkDir(fns, o.opts.RepoPath)
 
+	// Pre-evaluate dynamic matrix expressions (e.g. fromJSON(vars.matrix))
+	// before graph building, so matrix expansion can produce concrete nodes.
+	resolveMatrixExpressions(w, initialCtx, fns)
+
+	// Build graph.
+	g, err := graph.Build(w)
+	if err != nil {
+		return nil, fmt.Errorf("graph error: %w", err)
+	}
+	if err := g.Validate(); err != nil {
+		return nil, fmt.Errorf("graph error: %w", err)
+	}
+
 	// Create execution plan.
 	plan, err := g.Plan(initialCtx, graph.PlanOptions{Functions: fns})
 	if err != nil {
@@ -172,6 +177,14 @@ func (o *Orchestrator) Run(ctx context.Context) (*RunResult, error) {
 		plan = filterPlan(plan, o.opts.JobFilter)
 		if len(plan.Groups) == 0 {
 			return nil, fmt.Errorf("no jobs match filter %q", o.opts.JobFilter)
+		}
+	}
+
+	// Filter matrix combinations if requested.
+	if len(o.opts.MatrixFilter) > 0 {
+		plan = filterPlanByMatrix(plan, o.opts.MatrixFilter)
+		if len(plan.Groups) == 0 {
+			return nil, fmt.Errorf("no matrix combinations match filter")
 		}
 	}
 
@@ -649,6 +662,9 @@ func (o *Orchestrator) executeJob(
 		}
 	}
 
+	// Apply workflow-level defaults to job if the job doesn't define its own.
+	applyWorkflowDefaults(w, node.Job)
+
 	// Build context for this job.
 	jobCtx := o.buildContext(w, node, jobOutputs, nil, runID)
 
@@ -694,6 +710,11 @@ func (o *Orchestrator) executeJob(
 		BrokerURL: brokerSrv.URL(),
 		Name:      "ions-" + node.NodeID,
 		WorkDir:   workDir,
+		ExtraEnv: []string{
+			"GITHUB_SERVER_URL=" + brokerSrv.URL(),
+			"GITHUB_API_URL=" + brokerSrv.URL() + "/api/v3",
+			"GITHUB_GRAPHQL_URL=" + brokerSrv.URL() + "/api/v3/graphql",
+		},
 	})
 	if err != nil {
 		o.logger.JobCompleted(node.NodeID, "failure", time.Since(start))
@@ -872,6 +893,9 @@ func (o *Orchestrator) buildContext(
 			opts.FailFast = node.Job.Strategy.FailFast
 			opts.MaxParallel = node.Job.Strategy.MaxParallel
 		}
+		if node.Job.Environment != nil {
+			opts.EnvironmentName = node.Job.Environment.Name
+		}
 	}
 
 	builder := ionsctx.NewBuilder(opts)
@@ -914,6 +938,40 @@ func filterPlan(plan *graph.ExecutionPlan, filter string) *graph.ExecutionPlan {
 		var nodes []*graph.JobNode
 		for _, node := range group.Nodes {
 			if node.JobID == filter || node.NodeID == filter {
+				nodes = append(nodes, node)
+			}
+		}
+		if len(nodes) > 0 {
+			filtered.Groups = append(filtered.Groups, graph.ParallelGroup{Nodes: nodes})
+		}
+	}
+
+	return filtered
+}
+
+// filterPlanByMatrix filters the execution plan to only include matrix nodes
+// where all specified key=value pairs match. Non-matrix nodes are always included.
+func filterPlanByMatrix(plan *graph.ExecutionPlan, filter map[string]string) *graph.ExecutionPlan {
+	filtered := &graph.ExecutionPlan{}
+
+	for _, group := range plan.Groups {
+		var nodes []*graph.JobNode
+		for _, node := range group.Nodes {
+			if node.MatrixValues == nil {
+				// Non-matrix nodes pass through.
+				nodes = append(nodes, node)
+				continue
+			}
+			// Check all filter keys match.
+			match := true
+			for k, v := range filter {
+				mv, ok := node.MatrixValues[k]
+				if !ok || fmt.Sprintf("%v", mv) != v {
+					match = false
+					break
+				}
+			}
+			if match {
 				nodes = append(nodes, node)
 			}
 		}
@@ -1249,6 +1307,162 @@ func (o *Orchestrator) executeReusableWorkflow(
 		Status:   status,
 		Duration: duration,
 		Outputs:  outputs,
+	}
+}
+
+// resolveMatrixExpressions evaluates dynamic matrix expressions (e.g.
+// ${{ fromJSON(vars.matrix) }}) and replaces them with concrete matrix
+// definitions. This must be called before graph.Build() so that matrix
+// expansion can produce concrete job nodes.
+func resolveMatrixExpressions(w *workflow.Workflow, ctx expression.MapContext, fns map[string]expression.Function) {
+	for _, job := range w.Jobs {
+		if job.Strategy == nil || job.Strategy.Matrix == nil {
+			continue
+		}
+		m := job.Strategy.Matrix
+		if m.Expression == "" {
+			continue
+		}
+
+		// Strip ${{ }} wrapper if present.
+		expr := m.Expression
+		expr = strings.TrimSpace(expr)
+		if strings.HasPrefix(expr, "${{") && strings.HasSuffix(expr, "}}") {
+			expr = strings.TrimSpace(expr[3 : len(expr)-2])
+		}
+
+		// Skip expressions that reference needs.* — those can't be resolved statically.
+		if strings.Contains(expr, "needs.") {
+			continue
+		}
+
+		result, err := expression.EvalExpressionWithFunctions(expr, ctx, fns)
+		if err != nil {
+			continue // Can't resolve — leave as expression for runtime
+		}
+
+		// The result should be an object (map) with dimension keys → arrays.
+		fields := result.ObjectFields()
+		if fields == nil {
+			continue
+		}
+
+		// Convert expression result back to a concrete Matrix.
+		newMatrix := &workflow.Matrix{
+			Dimensions: make(map[string][]interface{}),
+		}
+
+		for key, val := range fields {
+			switch key {
+			case "include":
+				newMatrix.Include = expressionValueToListOfMaps(val)
+			case "exclude":
+				newMatrix.Exclude = expressionValueToListOfMaps(val)
+			default:
+				// Dimension: expect an array of values.
+				arr := val.ArrayItems()
+				if arr != nil {
+					vals := make([]interface{}, len(arr))
+					for i, elem := range arr {
+						vals[i] = expressionValueToInterface(elem)
+					}
+					newMatrix.Dimensions[key] = vals
+				}
+			}
+		}
+
+		job.Strategy.Matrix = newMatrix
+	}
+}
+
+// expressionValueToInterface converts an expression.Value to a Go interface{}.
+func expressionValueToInterface(v expression.Value) interface{} {
+	switch v.Kind() {
+	case expression.KindNull:
+		return nil
+	case expression.KindBool:
+		return v.BoolVal()
+	case expression.KindNumber:
+		n := v.NumberVal()
+		if n == float64(int(n)) {
+			return int(n)
+		}
+		return n
+	case expression.KindString:
+		return v.StringVal()
+	}
+	// Fall through for arrays and objects.
+	if fields := v.ObjectFields(); fields != nil {
+		m := make(map[string]interface{}, len(fields))
+		for k, fv := range fields {
+			m[k] = expressionValueToInterface(fv)
+		}
+		return m
+	}
+	if arr := v.ArrayItems(); arr != nil {
+		result := make([]interface{}, len(arr))
+		for i, elem := range arr {
+			result[i] = expressionValueToInterface(elem)
+		}
+		return result
+	}
+	return v.StringVal()
+}
+
+// expressionValueToListOfMaps converts an expression array value to []map[string]interface{}.
+func expressionValueToListOfMaps(v expression.Value) []map[string]interface{} {
+	arr := v.ArrayItems()
+	if arr == nil {
+		return nil
+	}
+	var result []map[string]interface{}
+	for _, elem := range arr {
+		fields := elem.ObjectFields()
+		if fields == nil {
+			continue
+		}
+		m := make(map[string]interface{}, len(fields))
+		for k, fv := range fields {
+			m[k] = expressionValueToInterface(fv)
+		}
+		result = append(result, m)
+	}
+	return result
+}
+
+// applyWorkflowDefaults merges workflow-level defaults into a job when the
+// job doesn't define its own. Job-level values take precedence over workflow-level.
+func applyWorkflowDefaults(w *workflow.Workflow, job *workflow.Job) {
+	if w.Defaults == nil || w.Defaults.Run == nil {
+		return
+	}
+	wfRun := w.Defaults.Run
+
+	if job.Defaults == nil {
+		// No job defaults — inherit workflow defaults entirely.
+		job.Defaults = &workflow.Defaults{
+			Run: &workflow.RunDefaults{
+				Shell:            wfRun.Shell,
+				WorkingDirectory: wfRun.WorkingDirectory,
+			},
+		}
+		return
+	}
+
+	if job.Defaults.Run == nil {
+		job.Defaults.Run = &workflow.RunDefaults{
+			Shell:            wfRun.Shell,
+			WorkingDirectory: wfRun.WorkingDirectory,
+		}
+		return
+	}
+
+	// Merge: workflow fills in gaps that job doesn't set.
+	if job.Defaults.Run.Shell == "" {
+		job.Defaults.Run.Shell = wfRun.Shell
+	}
+	if job.Defaults.Run.WorkingDirectory == "" {
+		job.Defaults.Run.WorkingDirectory = wfRun.WorkingDirectory
 	}
 }
 

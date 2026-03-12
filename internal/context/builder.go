@@ -64,6 +64,9 @@ type BuilderOptions struct {
 	// Job status for the job context ("success", "failure", "cancelled")
 	JobStatus string
 
+	// EnvironmentName is the deployment environment name from the job's environment: field.
+	EnvironmentName string
+
 	// APIBaseURL overrides the default https://api.github.com for the
 	// github.api_url and github.graphql_url context fields.
 	// Set by the orchestrator to route API calls through the local stub.

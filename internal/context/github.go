@@ -103,6 +103,7 @@ func GitHubContext(opts BuilderOptions) expression.Value {
 		"action_path":       expression.String(""),
 		"action_ref":        expression.String(""),
 		"action_repository": expression.String(""),
+		"environment":       expression.String(opts.EnvironmentName),
 	}
 
 	return expression.Object(fields)

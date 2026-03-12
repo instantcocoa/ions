@@ -3834,3 +3834,232 @@ func TestCopyDir_CrossFilesystem(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "nested", string(data))
 }
+
+// ---------------------------------------------------------------------------
+// applyWorkflowDefaults
+// ---------------------------------------------------------------------------
+
+func TestApplyWorkflowDefaults_NoWorkflowDefaults(t *testing.T) {
+	w := &workflow.Workflow{}
+	job := &workflow.Job{}
+	applyWorkflowDefaults(w, job)
+	assert.Nil(t, job.Defaults)
+}
+
+func TestApplyWorkflowDefaults_InheritWorkflowShell(t *testing.T) {
+	w := &workflow.Workflow{
+		Defaults: &workflow.Defaults{
+			Run: &workflow.RunDefaults{Shell: "bash", WorkingDirectory: "/app"},
+		},
+	}
+	job := &workflow.Job{}
+	applyWorkflowDefaults(w, job)
+	require.NotNil(t, job.Defaults)
+	require.NotNil(t, job.Defaults.Run)
+	assert.Equal(t, "bash", job.Defaults.Run.Shell)
+	assert.Equal(t, "/app", job.Defaults.Run.WorkingDirectory)
+}
+
+func TestApplyWorkflowDefaults_JobOverridesWorkflow(t *testing.T) {
+	w := &workflow.Workflow{
+		Defaults: &workflow.Defaults{
+			Run: &workflow.RunDefaults{Shell: "bash", WorkingDirectory: "/app"},
+		},
+	}
+	job := &workflow.Job{
+		Defaults: &workflow.Defaults{
+			Run: &workflow.RunDefaults{Shell: "pwsh"},
+		},
+	}
+	applyWorkflowDefaults(w, job)
+	assert.Equal(t, "pwsh", job.Defaults.Run.Shell)
+	// WorkingDirectory inherited from workflow since job didn't set it.
+	assert.Equal(t, "/app", job.Defaults.Run.WorkingDirectory)
+}
+
+// ---------------------------------------------------------------------------
+// filterPlanByMatrix
+// ---------------------------------------------------------------------------
+
+func TestFilterPlanByMatrix(t *testing.T) {
+	plan := &graph.ExecutionPlan{
+		Groups: []graph.ParallelGroup{
+			{
+				Nodes: []*graph.JobNode{
+					{NodeID: "test (os: ubuntu)", MatrixValues: graph.MatrixCombination{"os": "ubuntu"}},
+					{NodeID: "test (os: macos)", MatrixValues: graph.MatrixCombination{"os": "macos"}},
+					{NodeID: "lint", MatrixValues: nil},
+				},
+			},
+		},
+	}
+
+	filtered := filterPlanByMatrix(plan, map[string]string{"os": "ubuntu"})
+	require.Len(t, filtered.Groups, 1)
+	// Should include the matching matrix node + the non-matrix node.
+	assert.Len(t, filtered.Groups[0].Nodes, 2)
+	nodeIDs := []string{filtered.Groups[0].Nodes[0].NodeID, filtered.Groups[0].Nodes[1].NodeID}
+	assert.Contains(t, nodeIDs, "test (os: ubuntu)")
+	assert.Contains(t, nodeIDs, "lint")
+}
+
+func TestFilterPlanByMatrix_NoMatch(t *testing.T) {
+	plan := &graph.ExecutionPlan{
+		Groups: []graph.ParallelGroup{
+			{
+				Nodes: []*graph.JobNode{
+					{NodeID: "test (os: ubuntu)", MatrixValues: graph.MatrixCombination{"os": "ubuntu"}},
+				},
+			},
+		},
+	}
+
+	filtered := filterPlanByMatrix(plan, map[string]string{"os": "windows"})
+	assert.Empty(t, filtered.Groups)
+}
+
+// ---------------------------------------------------------------------------
+// resolveMatrixExpressions
+// ---------------------------------------------------------------------------
+
+func TestResolveMatrixExpressions(t *testing.T) {
+	w := &workflow.Workflow{
+		Jobs: map[string]*workflow.Job{
+			"test": {
+				Strategy: &workflow.Strategy{
+					Matrix: &workflow.Matrix{
+						Expression: "${{ fromJSON('{\"os\":[\"ubuntu\",\"macos\"]}') }}",
+					},
+				},
+				Steps: []workflow.Step{{Run: "echo hi"}},
+			},
+		},
+	}
+
+	ctx := expression.MapContext{}
+	fns := expression.BuiltinFunctions()
+	resolveMatrixExpressions(w, ctx, fns)
+
+	m := w.Jobs["test"].Strategy.Matrix
+	assert.Empty(t, m.Expression, "expression should be cleared")
+	assert.Contains(t, m.Dimensions, "os")
+	assert.Len(t, m.Dimensions["os"], 2)
+}
+
+func TestResolveMatrixExpressions_NeedsSkipped(t *testing.T) {
+	w := &workflow.Workflow{
+		Jobs: map[string]*workflow.Job{
+			"test": {
+				Strategy: &workflow.Strategy{
+					Matrix: &workflow.Matrix{
+						Expression: "${{ fromJSON(needs.setup.outputs.matrix) }}",
+					},
+				},
+				Steps: []workflow.Step{{Run: "echo hi"}},
+			},
+		},
+	}
+
+	ctx := expression.MapContext{}
+	fns := expression.BuiltinFunctions()
+	resolveMatrixExpressions(w, ctx, fns)
+
+	// Expression should NOT be cleared — it references needs.*
+	m := w.Jobs["test"].Strategy.Matrix
+	assert.NotEmpty(t, m.Expression)
+}
+
+// ---------------------------------------------------------------------------
+// Workflow command parsing
+// ---------------------------------------------------------------------------
+
+func TestParseWorkflowCommand_Error(t *testing.T) {
+	cmd, params, msg, ok := parseWorkflowCommand("::error file=main.go,line=10::something went wrong")
+	assert.True(t, ok)
+	assert.Equal(t, "error", cmd)
+	assert.Equal(t, "main.go", params["file"])
+	assert.Equal(t, "10", params["line"])
+	assert.Equal(t, "something went wrong", msg)
+}
+
+func TestParseWorkflowCommand_Warning(t *testing.T) {
+	cmd, _, msg, ok := parseWorkflowCommand("::warning::deprecation notice")
+	assert.True(t, ok)
+	assert.Equal(t, "warning", cmd)
+	assert.Equal(t, "deprecation notice", msg)
+}
+
+func TestParseWorkflowCommand_Group(t *testing.T) {
+	cmd, _, msg, ok := parseWorkflowCommand("::group::Install dependencies")
+	assert.True(t, ok)
+	assert.Equal(t, "group", cmd)
+	assert.Equal(t, "Install dependencies", msg)
+}
+
+func TestParseWorkflowCommand_NotACommand(t *testing.T) {
+	_, _, _, ok := parseWorkflowCommand("just a normal log line")
+	assert.False(t, ok)
+}
+
+func TestParseWorkflowCommand_SingleColon(t *testing.T) {
+	_, _, _, ok := parseWorkflowCommand("::no closing double colon")
+	assert.False(t, ok)
+}
+
+func TestAnnotationLocation(t *testing.T) {
+	tests := []struct {
+		ann  Annotation
+		want string
+	}{
+		{Annotation{File: "foo.go", Line: "10", Col: "5"}, " (foo.go:10:5)"},
+		{Annotation{File: "foo.go", Line: "10"}, " (foo.go:10)"},
+		{Annotation{File: "foo.go"}, " (foo.go)"},
+		{Annotation{}, ""},
+	}
+	for _, tt := range tests {
+		assert.Equal(t, tt.want, annotationLocation(tt.ann))
+	}
+}
+
+func TestLogStreamer_WorkflowCommands(t *testing.T) {
+	masker := NewSecretMasker(nil)
+	logger := NewLogStreamer(masker, true) // verbose to capture debug
+	var buf bytes.Buffer
+	logger.SetWriter(&buf)
+
+	logger.StepOutput("job1", "::error file=main.go,line=5::build failed")
+	logger.StepOutput("job1", "::warning::deprecated API")
+	logger.StepOutput("job1", "::debug::trace info")
+	logger.StepOutput("job1", "::group::Setup")
+	logger.StepOutput("job1", "::endgroup::")
+	logger.StepOutput("job1", "normal line")
+
+	output := buf.String()
+	assert.Contains(t, output, "Error:")
+	assert.Contains(t, output, "build failed")
+	assert.Contains(t, output, "main.go:5")
+	assert.Contains(t, output, "Warning:")
+	assert.Contains(t, output, "deprecated API")
+	assert.Contains(t, output, "trace info") // verbose=true, so debug is shown
+	assert.Contains(t, output, ">> Setup")
+	assert.Contains(t, output, "normal line")
+
+	anns := logger.Annotations()
+	assert.Len(t, anns, 2) // error + warning (notice not sent)
+	assert.Equal(t, "error", anns[0].Level)
+	assert.Equal(t, "warning", anns[1].Level)
+}
+
+func TestLogStreamer_AddMask(t *testing.T) {
+	masker := NewSecretMasker(nil)
+	logger := NewLogStreamer(masker, false)
+	var buf bytes.Buffer
+	logger.SetWriter(&buf)
+
+	logger.StepOutput("job1", "::add-mask::mysecret")
+	logger.StepOutput("job1", "the value is mysecret here")
+
+	output := buf.String()
+	assert.NotContains(t, output, "mysecret")
+	assert.Contains(t, output, "***")
+}

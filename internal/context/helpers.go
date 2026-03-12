@@ -1,6 +1,9 @@
 package context
 
 import (
+	"encoding/json"
+	"fmt"
+
 	"github.com/emaland/ions/internal/expression"
 )
 
@@ -89,8 +92,19 @@ func toExpressionValue(v any) expression.Value {
 			fields[k] = toExpressionValue(item)
 		}
 		return expression.Object(fields)
+	case json.Number:
+		if n, err := val.Float64(); err == nil {
+			return expression.Number(n)
+		}
+		return expression.String(val.String())
+	case map[interface{}]interface{}:
+		fields := make(map[string]expression.Value, len(val))
+		for k, item := range val {
+			fields[fmt.Sprintf("%v", k)] = toExpressionValue(item)
+		}
+		return expression.Object(fields)
 	default:
-		// Fallback: convert to string
-		return expression.Null()
+		// Fallback: convert unknown types to their string representation.
+		return expression.String(fmt.Sprintf("%v", val))
 	}
 }

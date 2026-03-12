@@ -1,6 +1,7 @@
 package context
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -248,10 +249,11 @@ func TestGitHubContext_DefaultRef(t *testing.T) {
 // --- toExpressionValue edge cases ---
 
 func TestToExpressionValue_UnsupportedType(t *testing.T) {
-	// A struct is not a recognized type -- should return Null.
+	// A struct is not a recognized type -- converted to string via fmt.Sprintf.
 	type custom struct{ X int }
 	result := toExpressionValue(custom{X: 42})
-	assert.Equal(t, expression.KindNull, result.Kind())
+	assert.Equal(t, expression.KindString, result.Kind())
+	assert.Equal(t, "{42}", result.StringVal())
 }
 
 func TestToExpressionValue_Int8(t *testing.T) {
@@ -410,4 +412,24 @@ func TestEnvContext_AllLevelsOverlap(t *testing.T) {
 	assert.Equal(t, "step", getField(t, ctx, "A").StringVal())
 	assert.Equal(t, "job", getField(t, ctx, "B").StringVal())
 	assert.Equal(t, "wf", getField(t, ctx, "C").StringVal())
+}
+
+func TestToExpressionValue_JSONNumber(t *testing.T) {
+	n := json.Number("42.5")
+	result := toExpressionValue(n)
+	assert.Equal(t, expression.KindNumber, result.Kind())
+	assert.Equal(t, 42.5, result.NumberVal())
+}
+
+func TestToExpressionValue_MapInterfaceInterface(t *testing.T) {
+	// YAML sometimes produces map[interface{}]interface{} instead of map[string]any.
+	m := map[interface{}]interface{}{
+		"key": "value",
+		42:    "num-key",
+	}
+	result := toExpressionValue(m)
+	assert.Equal(t, expression.KindObject, result.Kind())
+	fields := result.ObjectFields()
+	assert.Equal(t, "value", fields["key"].StringVal())
+	assert.Equal(t, "num-key", fields["42"].StringVal())
 }
