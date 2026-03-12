@@ -196,6 +196,7 @@ func runCmd() *cobra.Command {
 		envFile         string
 		inputs          []string
 		matrixFilter    []string
+		envSecrets      []string
 		dryRun          bool
 		jsonOutput      bool
 		eventPayload    string
@@ -248,6 +249,13 @@ and runs the first one found (or lists them if multiple exist).`,
 				secretMap[k] = v
 			}
 
+			// Parse --env-secret flags and load .secrets.{env} files.
+			envSecretMap := parseEnvSecrets(envSecrets)
+			if envSecretMap == nil {
+				envSecretMap = make(map[string]map[string]string)
+			}
+			loadEnvironmentSecretFiles(envSecretMap)
+
 			// Load custom event payload if provided.
 			var eventData map[string]any
 			if eventPayload != "" {
@@ -265,6 +273,7 @@ and runs the first one found (or lists them if multiple exist).`,
 				JobFilter:       jobFilter,
 				EventName:       eventName,
 				Secrets:         secretMap,
+				EnvSecrets:      envSecretMap,
 				Vars:            parseKeyValues(vars),
 				Env:             envMap,
 				Inputs:          parseKeyValues(inputs),
@@ -331,6 +340,7 @@ and runs the first one found (or lists them if multiple exist).`,
 	cmd.Flags().BoolVar(&reuseContainers, "reuse-containers", false, "don't remove containers after run (debugging)")
 	cmd.Flags().StringVar(&platform, "platform", "", "override platform detection (e.g. linux/amd64)")
 	cmd.Flags().StringVar(&githubToken, "github-token", "", "GitHub token for API passthrough (optional)")
+	cmd.Flags().StringSliceVar(&envSecrets, "env-secret", nil, "environment secret ENV:KEY=VALUE (repeatable)")
 	cmd.Flags().BoolVarP(&watch, "watch", "w", false, "re-run workflow on file changes")
 
 	return cmd
@@ -603,6 +613,76 @@ func loadEnvFile(path string) map[string]string {
 		m[strings.TrimSpace(k)] = v
 	}
 	return m
+}
+
+// parseEnvSecrets converts ["ENV:KEY=VALUE", ...] to map[string]map[string]string.
+// Each entry maps an environment name to its secrets.
+func parseEnvSecrets(kvs []string) map[string]map[string]string {
+	if len(kvs) == 0 {
+		return nil
+	}
+	m := make(map[string]map[string]string)
+	for _, kv := range kvs {
+		envName, rest, ok := strings.Cut(kv, ":")
+		if !ok || envName == "" {
+			fmt.Fprintf(os.Stderr, "warning: ignoring malformed --env-secret %q (expected ENV:KEY=VALUE)\n", kv)
+			continue
+		}
+		key, value, ok := strings.Cut(rest, "=")
+		if !ok {
+			fmt.Fprintf(os.Stderr, "warning: ignoring malformed --env-secret %q (expected ENV:KEY=VALUE)\n", kv)
+			continue
+		}
+		if m[envName] == nil {
+			m[envName] = make(map[string]string)
+		}
+		m[envName][key] = value
+	}
+	return m
+}
+
+// loadEnvironmentSecretFiles discovers .secrets.{envname} files in the current
+// directory and loads them into the env secrets map. CLI flags take precedence
+// over file values.
+func loadEnvironmentSecretFiles(envSecretMap map[string]map[string]string) {
+	entries, err := os.ReadDir(".")
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		name := e.Name()
+		if !strings.HasPrefix(name, ".secrets.") || e.IsDir() {
+			continue
+		}
+		// Check it's a regular file (not a symlink to something unexpected).
+		info, err := e.Info()
+		if err != nil || info.Mode()&os.ModeSymlink != 0 {
+			continue
+		}
+		envName := strings.TrimPrefix(name, ".secrets.")
+		if envName == "" {
+			continue
+		}
+		fileSecrets := loadEnvFile(name)
+		if len(fileSecrets) == 0 {
+			continue
+		}
+		if envSecretMap == nil {
+			// Caller passed nil; we can't assign back through the param,
+			// but this is only called with a non-nil map from parseEnvSecrets
+			// or an initialized map. This guard is defensive.
+			continue
+		}
+		if envSecretMap[envName] == nil {
+			envSecretMap[envName] = make(map[string]string)
+		}
+		for k, v := range fileSecrets {
+			// Don't overwrite CLI-provided values.
+			if _, exists := envSecretMap[envName][k]; !exists {
+				envSecretMap[envName][k] = v
+			}
+		}
+	}
 }
 
 // parseKeyValues converts ["KEY=VALUE", ...] to map[string]string.

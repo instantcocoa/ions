@@ -28,8 +28,9 @@ type RequestLogEntry struct {
 
 // jobEnvelope wraps a job message with its completion channel.
 type jobEnvelope struct {
-	msg    *AgentJobRequestMessage
-	result chan *JobCompletionResult
+	msg         *AgentJobRequestMessage
+	result      chan *JobCompletionResult
+	targetAgent string // if non-empty, only deliver to sessions with this agent name
 }
 
 // session tracks a connected runner session.
@@ -53,7 +54,8 @@ type Server struct {
 	sessions map[string]*session
 
 	// Job queue: orchestrator pushes, runner polls.
-	pendingJobs chan *jobEnvelope
+	pendingJobs []*jobEnvelope
+	jobNotify   chan struct{} // signaled when a new job is enqueued
 
 	// Active jobs being executed, indexed by jobId.
 	activeJobs map[string]*jobEnvelope
@@ -133,7 +135,7 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 		exprDefaults: cfg.ExprDefaults,
 		githubToken:  cfg.GitHubToken,
 		sessions:     make(map[string]*session),
-		pendingJobs:  make(chan *jobEnvelope, 100),
+		jobNotify:    make(chan struct{}, 100),
 		activeJobs:   make(map[string]*jobEnvelope),
 		requestToJob:      make(map[int64]string),
 		messageToJob:      make(map[int64]string),
@@ -253,13 +255,24 @@ func (s *Server) URL() string {
 }
 
 // EnqueueJob submits a job for the runner to pick up. Returns a channel
-// that will receive the completion result.
-func (s *Server) EnqueueJob(msg *AgentJobRequestMessage) <-chan *JobCompletionResult {
+// that will receive the completion result. If targetAgent is provided,
+// the job will only be delivered to a session whose agent name matches.
+func (s *Server) EnqueueJob(msg *AgentJobRequestMessage, targetAgent ...string) <-chan *JobCompletionResult {
 	env := &jobEnvelope{
 		msg:    msg,
 		result: make(chan *JobCompletionResult, 1),
 	}
-	s.pendingJobs <- env
+	if len(targetAgent) > 0 {
+		env.targetAgent = targetAgent[0]
+	}
+	s.mu.Lock()
+	s.pendingJobs = append(s.pendingJobs, env)
+	s.mu.Unlock()
+	// Notify waiters that a new job is available.
+	select {
+	case s.jobNotify <- struct{}{}:
+	default:
+	}
 	return env.result
 }
 
@@ -675,6 +688,10 @@ func (s *Server) handleGetMessage(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	sess := s.sessions[sessionID]
 	alreadyHasJob := sess != nil && sess.hasJob
+	agentName := ""
+	if sess != nil {
+		agentName = sess.agent.Name
+	}
 	s.mu.Unlock()
 
 	if alreadyHasJob {
@@ -692,44 +709,74 @@ func (s *Server) handleGetMessage(w http.ResponseWriter, r *http.Request) {
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
 
-	select {
-	case env := <-s.pendingJobs:
-		// Got a job — send it as a message.
-		bodyBytes, err := json.Marshal(env.msg)
-		if err != nil {
-			http.Error(w, "marshal error", http.StatusInternalServerError)
+	// Try to find a matching job from the pending queue.
+	if env := s.claimJob(agentName); env != nil {
+		s.deliverJob(w, env, sess)
+		return
+	}
+
+	// Wait for new jobs to arrive.
+	for {
+		select {
+		case <-s.jobNotify:
+			if env := s.claimJob(agentName); env != nil {
+				s.deliverJob(w, env, sess)
+				return
+			}
+		case <-timer.C:
+			w.WriteHeader(http.StatusAccepted)
+			return
+		case <-r.Context().Done():
+			w.WriteHeader(http.StatusAccepted)
 			return
 		}
-
-		msgID := s.messageIDCounter.Add(1)
-
-		// Store in active jobs and mark this session as having a job.
-		s.mu.Lock()
-		s.activeJobs[env.msg.JobID] = env
-		s.requestToJob[env.msg.RequestID] = env.msg.JobID
-		s.messageToJob[msgID] = env.msg.JobID
-		if env.msg.Timeline != nil {
-			s.timelineToJob[env.msg.Timeline.ID] = env.msg.JobID
-		}
-		if sess != nil {
-			sess.hasJob = true
-		}
-		s.mu.Unlock()
-
-		msg := TaskAgentMessage{
-			MessageID:   msgID,
-			MessageType: "PipelineAgentJobRequest",
-			Body:        string(bodyBytes),
-		}
-		writeJSON(w, http.StatusOK, msg)
-
-	case <-timer.C:
-		// No job available — return empty response.
-		w.WriteHeader(http.StatusAccepted)
-
-	case <-r.Context().Done():
-		w.WriteHeader(http.StatusAccepted)
 	}
+}
+
+// claimJob finds and removes the first pending job that matches the given agent name.
+// If agentName is empty, it matches any job without a target. If a job has a
+// targetAgent set, it only matches sessions with that exact agent name.
+func (s *Server) claimJob(agentName string) *jobEnvelope {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i, env := range s.pendingJobs {
+		if env.targetAgent == "" || env.targetAgent == agentName {
+			// Remove from the queue.
+			s.pendingJobs = append(s.pendingJobs[:i], s.pendingJobs[i+1:]...)
+			return env
+		}
+	}
+	return nil
+}
+
+// deliverJob sends a job message to the runner and updates tracking state.
+func (s *Server) deliverJob(w http.ResponseWriter, env *jobEnvelope, sess *session) {
+	bodyBytes, err := json.Marshal(env.msg)
+	if err != nil {
+		http.Error(w, "marshal error", http.StatusInternalServerError)
+		return
+	}
+
+	msgID := s.messageIDCounter.Add(1)
+
+	s.mu.Lock()
+	s.activeJobs[env.msg.JobID] = env
+	s.requestToJob[env.msg.RequestID] = env.msg.JobID
+	s.messageToJob[msgID] = env.msg.JobID
+	if env.msg.Timeline != nil {
+		s.timelineToJob[env.msg.Timeline.ID] = env.msg.JobID
+	}
+	if sess != nil {
+		sess.hasJob = true
+	}
+	s.mu.Unlock()
+
+	msg := TaskAgentMessage{
+		MessageID:   msgID,
+		MessageType: "PipelineAgentJobRequest",
+		Body:        string(bodyBytes),
+	}
+	writeJSON(w, http.StatusOK, msg)
 }
 
 func (s *Server) handleDeleteMessage(w http.ResponseWriter, r *http.Request) {

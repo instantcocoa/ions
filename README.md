@@ -82,6 +82,8 @@ ions run .github/workflows/ci.yml --reuse-containers
 | `--dry-run` | Print execution plan without running |
 | `--artifact-dir PATH` | Override artifact storage location |
 | `--reuse-containers` | Don't remove containers after run |
+| `--env-secret ENV:KEY=VALUE` | Inject environment-scoped secret (repeatable) |
+| `--event-payload PATH` | Path to a JSON file for `github.event` |
 | `--platform <os/arch>` | Override platform detection (e.g., `linux/amd64`) |
 | `-v, --verbose` | Show runner output and debug logs |
 
@@ -123,19 +125,26 @@ ions clean
 
 ## What works
 
-ions has been tested with these workflow patterns:
+ions has been tested end-to-end with 30+ workflow files. Passing workflows:
 
 - **Shell steps** — `run:` commands with bash, multi-line scripts, environment variables
 - **Marketplace actions** — `actions/checkout@v4`, `actions/setup-node@v4`, `actions/setup-go@v5`, `actions/cache@v4`, `actions/upload-artifact@v4`, `actions/download-artifact@v4`
 - **Job dependencies** — `needs:` with output passing between jobs
-- **Matrix strategy** — multi-dimensional matrix expansion with concurrent execution (tested with 8 parallel jobs)
-- **Conditional execution** — `if:` conditions at job and step level, `continue-on-error`
+- **Matrix strategy** — multi-dimensional matrix expansion with concurrent execution, `include`/`exclude`, `max-parallel`, `fail-fast` (tested with up to 8 parallel jobs)
+- **Conditional execution** — `if:` conditions at job and step level, `continue-on-error` (downstream jobs correctly see success conclusion)
 - **Service containers** — Docker services (e.g., postgres) with port mapping and health checks
 - **Composite actions** — local composite actions with inputs, outputs, and multi-step execution
+- **Reusable workflows** — local reusable workflows with `uses:` at job level, inputs, secrets, and output passing
 - **Expressions** — `${{ }}` with all standard contexts (`github`, `env`, `steps`, `needs`, `matrix`, `secrets`, `inputs`, `vars`, `runner`, `strategy`, `job`) and functions (`contains`, `startsWith`, `format`, `toJSON`, `fromJSON`, `hashFiles`, `success()`, `failure()`, `always()`, etc.)
+- **Complex expressions** — ternary-style conditionals, string manipulation, JSON round-tripping, nested function calls
+- **Concurrency** — `concurrency:` groups with `cancel-in-progress`
+- **Environment secrets** — environment-scoped secrets via `--env-secret` and `.secrets.<env>` files
+- **Timeouts** — `timeout-minutes:` at job level
+- **Runtime conditions** — `success()`, `failure()`, `always()`, `cancelled()` with proper propagation through dependency chains
 - **Artifacts** — upload and download between jobs via v4 (twirp) and v3 (pipelines) APIs
 - **Caching** — save and restore with key matching, LRU eviction
 - **Secret masking** — secret values are replaced with `***` in all log output
+- **Docker-in-Docker** — on NixOS, the runner binary runs inside Docker containers with Docker socket access for managing job containers
 - **Real-world workflows** — production CI pipelines with checkout + setup-go + buf + go build/vet/lint
 
 ## Example workflows
@@ -297,8 +306,8 @@ The job message includes everything the runner needs: steps with their type and 
 
 ## What doesn't work yet
 
-- **Job containers** — `container:` at the job level is not yet implemented
-- **Reusable workflows** — `uses:` at the job level is parsed but not wired up
+- **Job containers** — `container:` at the job level is parsed but not fully wired up
+- **Docker actions** — `uses: docker://` actions are partially supported
 - **GitHub API calls** — Actions that call `api.github.com` directly will fail (a stub is planned)
 - **Private action registries** — Only public GitHub actions are supported
 - **Self-hosted runner labels** — `runs-on:` is parsed but not matched against real infrastructure

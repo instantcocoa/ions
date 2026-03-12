@@ -38,9 +38,10 @@ type Process struct {
 	stderr       io.ReadCloser
 	done         chan error
 	exited       bool
-	configLocked bool // true while we hold configMu
-	extraEnv     []string
-	mu           sync.Mutex
+	configLocked bool
+	extraEnv        []string
+	dockerContainer string
+	mu              sync.Mutex
 }
 
 // NewProcess creates a new runner process manager from the given config.
@@ -67,24 +68,22 @@ func NewProcess(cfg ProcessConfig) (*Process, error) {
 	}, nil
 }
 
-// configMu serializes writes to the shared runner directory's config files.
-// The runner resolves its root from the binary's location, so config files
-// must live next to the binary. We hold the lock through Configure+Start
-// to ensure each runner process reads its own config before the next one
-// overwrites it.
+// configMu serializes Configure+Start across processes. The runner reads
+// config from its root directory (determined by binary location), so when
+// multiple runners share the same binary directory, config files must not
+// be overwritten before the previous runner has loaded them.
 var configMu sync.Mutex
 
-// Configure writes the runner config files to the shared runner directory.
-// The caller must call Start() promptly after Configure() — the config lock
-// is held until the runner process has started and loaded its config.
+// Configure writes runner config files to the runner directory and acquires
+// the config lock. The caller must call Start() promptly — the lock is
+// released after the runner has had time to load its config.
 func (p *Process) Configure(ctx context.Context) error {
 	configMu.Lock()
 	p.mu.Lock()
 	p.configLocked = true
 	p.mu.Unlock()
-	// Lock is released in Start() after the runner process has launched.
 
-	// .runner — main config telling the runner where to connect.
+	// .runner — main config.
 	runnerConfig := map[string]any{
 		"agentId":    1,
 		"agentName":  p.name,
@@ -95,10 +94,12 @@ func (p *Process) Configure(ctx context.Context) error {
 		"workFolder": p.workDir,
 	}
 	if err := writeJSONFile(filepath.Join(p.runnerDir, ".runner"), runnerConfig); err != nil {
+		p.configLocked = false
+		configMu.Unlock()
 		return fmt.Errorf("writing .runner: %w", err)
 	}
 
-	// .credentials — OAuth credentials pointing to the broker's token endpoint.
+	// .credentials
 	credentials := map[string]any{
 		"scheme": "OAuth",
 		"data": map[string]string{
@@ -108,21 +109,42 @@ func (p *Process) Configure(ctx context.Context) error {
 		},
 	}
 	if err := writeJSONFile(filepath.Join(p.runnerDir, ".credentials"), credentials); err != nil {
+		p.configLocked = false
+		configMu.Unlock()
 		return fmt.Errorf("writing .credentials: %w", err)
 	}
 
-	// .credentials_rsaparams — the runner needs a valid RSA key to sign JWTs
-	// for the OAuth token exchange. Generate a real key pair.
+	// .credentials_rsaparams
 	rsaParams, err := generateRSAParams()
 	if err != nil {
+		p.configLocked = false
+		configMu.Unlock()
 		return fmt.Errorf("generating RSA key: %w", err)
 	}
 	if err := writeJSONFile(filepath.Join(p.runnerDir, ".credentials_rsaparams"), rsaParams); err != nil {
+		p.configLocked = false
+		configMu.Unlock()
 		return fmt.Errorf("writing .credentials_rsaparams: %w", err)
 	}
 
 	// Ensure work directory exists.
-	return os.MkdirAll(p.workDir, 0o755)
+	if err := os.MkdirAll(p.workDir, 0o755); err != nil {
+		p.configLocked = false
+		configMu.Unlock()
+		return err
+	}
+	return nil
+}
+
+// ReleaseConfigLock releases the config lock if it's held by this process.
+// Call this if Configure() was called but Start() will not be called.
+func (p *Process) ReleaseConfigLock() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.configLocked {
+		p.configLocked = false
+		configMu.Unlock()
+	}
 }
 
 // RunnerConfig returns the runner config that would be written to .runner.
@@ -139,16 +161,21 @@ func (p *Process) RunnerConfig() map[string]any {
 	}
 }
 
-// Start launches the runner process using run.sh.
+// Start launches the runner process.
 // Must be called after Configure(). Releases the config lock after the
 // runner has had time to read its config files.
 func (p *Process) Start(ctx context.Context) error {
-	// Release the config lock after the runner has loaded config files.
-	// The runner reads config synchronously during Main() startup, which
-	// takes ~200ms. We give it 2 seconds to be safe.
+	useDocker := needsDockerFn()
+
+	// Release the config lock after the runner has loaded config.
+	// Docker mode needs more time (docker.io install + runner startup).
 	defer func() {
 		go func() {
-			time.Sleep(2 * time.Second)
+			delay := 2 * time.Second
+			if useDocker {
+				delay = 30 * time.Second
+			}
+			time.Sleep(delay)
 			p.mu.Lock()
 			if p.configLocked {
 				p.configLocked = false
@@ -165,23 +192,19 @@ func (p *Process) Start(ctx context.Context) error {
 		return errors.New("runner process already started")
 	}
 
-	// Prefer bin/Runner.Listener directly — it's a self-contained binary
-	// and doesn't depend on /bin/bash being present (which NixOS lacks).
-	// Fall back to run.sh only if Runner.Listener doesn't exist.
-	runBin := filepath.Join(p.runnerDir, "bin", "Runner.Listener")
 	var cmd *exec.Cmd
-	if _, err := os.Stat(runBin); err == nil {
-		cmd = exec.CommandContext(ctx, runBin, "run")
+	if useDocker {
+		cmd = p.buildDockerCommand(ctx)
+		p.dockerContainer = sanitizeContainerName("ions-runner-" + p.name)
 	} else {
-		runScript := filepath.Join(p.runnerDir, "run.sh")
-		if _, err := os.Stat(runScript); err != nil {
+		cmd = p.buildNativeCommand(ctx)
+		if cmd == nil {
 			return fmt.Errorf("neither bin/Runner.Listener nor run.sh found in %s", p.runnerDir)
 		}
-		cmd = exec.CommandContext(ctx, runScript)
+		cmd.Env = append(os.Environ(), runnerEnvVars()...)
+		cmd.Env = append(cmd.Env, p.extraEnv...)
 	}
 	cmd.Dir = p.runnerDir
-	cmd.Env = append(os.Environ(), runnerEnvVars()...)
-	cmd.Env = append(cmd.Env, p.extraEnv...)
 	// Start in a new process group so we can kill all child processes at once.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
@@ -235,7 +258,15 @@ func (p *Process) Stop() error {
 	done := p.done
 	p.mu.Unlock()
 
+	containerName := p.dockerContainer
+
 	if cmd == nil || cmd.Process == nil {
+		return nil
+	}
+
+	if containerName != "" {
+		_ = exec.Command("docker", "stop", "-t", "5", containerName).Run()
+		_ = exec.Command("docker", "rm", "-f", containerName).Run()
 		return nil
 	}
 
@@ -290,6 +321,7 @@ func runnerEnvVars() []string {
 	return []string{
 		"ACTIONS_RUNNER_PRINT_LOG_TO_STDOUT=1",
 		"RUNNER_ALLOW_RUNASROOT=1",
+		"DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1",
 	}
 }
 
@@ -331,4 +363,93 @@ func generateRSAParams() (map[string]string, error) {
 		"dq":       b64(key.Precomputed.Dq.Bytes()),
 		"inverseQ": b64(key.Precomputed.Qinv.Bytes()),
 	}, nil
+}
+
+// sanitizeContainerName replaces characters not allowed in Docker container
+// names with hyphens. Docker allows [a-zA-Z0-9][a-zA-Z0-9_.-].
+func sanitizeContainerName(name string) string {
+	var b []byte
+	for i := 0; i < len(name); i++ {
+		c := name[i]
+		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '.' || c == '-' {
+			b = append(b, c)
+		} else {
+			b = append(b, '-')
+		}
+	}
+	return string(b)
+}
+
+// needsDockerFn returns true when the runner binary can't execute natively
+// (e.g. NixOS where dynamically linked ELF binaries from other distros fail).
+// Package-level var so tests can override.
+var needsDockerFn = func() bool {
+	_, err := os.Stat("/etc/NIXOS")
+	return err == nil
+}
+
+// buildNativeCommand creates the exec.Cmd for running the runner directly.
+func (p *Process) buildNativeCommand(ctx context.Context) *exec.Cmd {
+	runBin := filepath.Join(p.runnerDir, "bin", "Runner.Listener")
+	if _, err := os.Stat(runBin); err == nil {
+		return exec.CommandContext(ctx, runBin, "run")
+	}
+	runScript := filepath.Join(p.runnerDir, "run.sh")
+	if _, err := os.Stat(runScript); err == nil {
+		return exec.CommandContext(ctx, runScript)
+	}
+	return nil
+}
+
+// buildDockerCommand creates the exec.Cmd that runs the runner inside a
+// Docker container. Used on hosts where the runner binary can't execute
+// natively (e.g. NixOS). The container gets:
+//   - runner dir mounted at the same path (writable for _diag/)
+//   - work dir mounted at the same path
+//   - Docker socket for docker-in-docker
+//   - host networking so the runner can reach the broker on localhost
+//
+// The container image must have Docker CLI installed so the runner can
+// manage job containers (docker-in-docker via the mounted socket).
+func (p *Process) buildDockerCommand(ctx context.Context) *exec.Cmd {
+	containerName := sanitizeContainerName("ions-runner-" + p.name)
+
+	// Remove any leftover container from a previous run that wasn't cleaned up
+	// (e.g., if the process was killed). Ignore errors — it's fine if it doesn't exist.
+	_ = exec.Command("docker", "rm", "-f", containerName).Run()
+
+	listenerBin := filepath.Join(p.runnerDir, "bin", "Runner.Listener")
+
+	// Install Docker CLI at container start, then exec the runner.
+	// This avoids needing a custom image — plain ubuntu:24.04 works.
+	bootScript := fmt.Sprintf(
+		`mkdir -p %s/_diag && `+
+			`apt-get update -qq && apt-get install -y -qq docker.io >/dev/null 2>&1 && exec %s run`,
+		p.runnerDir,
+		listenerBin,
+	)
+
+	args := []string{
+		"run", "--rm",
+		"--name", containerName,
+		"--network", "host",
+		"-v", p.runnerDir + ":" + p.runnerDir,
+		"-v", p.workDir + ":" + p.workDir,
+		"-v", "/var/run/docker.sock:/var/run/docker.sock",
+		"-w", p.runnerDir,
+	}
+
+	for _, env := range runnerEnvVars() {
+		args = append(args, "-e", env)
+	}
+	for _, env := range p.extraEnv {
+		args = append(args, "-e", env)
+	}
+
+	args = append(args,
+		"ubuntu:24.04",
+		"bash", "-c", bootScript,
+	)
+
+	return exec.CommandContext(ctx, "docker", args...)
 }

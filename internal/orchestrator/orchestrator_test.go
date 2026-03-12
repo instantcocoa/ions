@@ -549,24 +549,6 @@ func TestCopyFile(t *testing.T) {
 	assert.Equal(t, "content", string(data))
 }
 
-func TestTestHardlink(t *testing.T) {
-	// Both in same temp dir — should support hardlinks.
-	src := t.TempDir()
-	require.NoError(t, os.WriteFile(filepath.Join(src, "probe.txt"), []byte("x"), 0o644))
-	dst := filepath.Join(src, "dst")
-	result := testHardlink(src, dst)
-	// On most filesystems within same dir, hardlinks work.
-	assert.True(t, result)
-}
-
-func TestTestHardlink_EmptyDir(t *testing.T) {
-	src := t.TempDir()
-	dst := filepath.Join(t.TempDir(), "dst")
-	// No files in src — can't test hardlink.
-	result := testHardlink(src, dst)
-	assert.False(t, result)
-}
-
 // ---------------------------------------------------------------------------
 // Progress UI utility tests
 // ---------------------------------------------------------------------------
@@ -2606,22 +2588,6 @@ func TestCopyDir_ManyFiles(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// testHardlink — additional edge cases
-// ---------------------------------------------------------------------------
-
-func TestTestHardlink_DstCreationFails(t *testing.T) {
-	src := t.TempDir()
-	require.NoError(t, os.WriteFile(filepath.Join(src, "probe.txt"), []byte("x"), 0o644))
-
-	// Use a path that can't be created as a directory.
-	existing := filepath.Join(t.TempDir(), "file")
-	require.NoError(t, os.WriteFile(existing, []byte("block"), 0o644))
-	dst := filepath.Join(existing, "subdir") // can't create dir under a file
-
-	result := testHardlink(src, dst)
-	assert.False(t, result)
-}
 
 // ---------------------------------------------------------------------------
 // isRelevantChange — remaining uncovered branch
@@ -3337,13 +3303,8 @@ jobs:
 // ---------------------------------------------------------------------------
 
 func TestCopyDir_HardlinkFallback(t *testing.T) {
-	// When the source is on a filesystem that doesn't support hardlinks
-	// or the hardlink test fails, copyDir should fall back to copyFile.
-	// We can force this by making testHardlink return false by using
-	// a read-only dst dir setup. However, testHardlink creates its own
-	// temp file. Instead, test that files copy correctly even when
-	// hardlinks might not work — the important thing is that copyDir
-	// produces a valid copy.
+	// copyDir always uses regular copies (never hardlinks) to avoid
+	// corrupting the source repo. Test that it produces a valid copy.
 	src := t.TempDir()
 	dst := filepath.Join(t.TempDir(), "output")
 

@@ -1,0 +1,22 @@
+name: Concurrency Cancel Test
+on: push
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "Building"
+      - run: echo "Done"
+
+  test:
+    needs: build
+    runs-on: ubuntu-latest
+    concurrency:
+      group: test-suite
+      cancel-in-progress: false
+    steps:
+      - run: echo "Testing"

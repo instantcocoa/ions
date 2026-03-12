@@ -10,6 +10,7 @@ import (
 // Manager manages Docker containers for ions jobs.
 type Manager struct {
 	reuseContainers bool
+	dockerConfig    *DockerConfig
 }
 
 // NewManager creates a Docker manager after verifying Docker is available.
@@ -21,7 +22,8 @@ func NewManager(reuseContainers bool) (*Manager, error) {
 	if err := cmd.Run(); err != nil {
 		return nil, fmt.Errorf("docker daemon not running: %w", err)
 	}
-	return &Manager{reuseContainers: reuseContainers}, nil
+	dockerCfg, _ := LoadDockerConfig()
+	return &Manager{reuseContainers: reuseContainers, dockerConfig: dockerCfg}, nil
 }
 
 // JobEnvironment holds the Docker resources for a job.

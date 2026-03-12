@@ -49,9 +49,14 @@ func (m *Manager) SetupServices(ctx context.Context, jobID string, services map[
 }
 
 func (m *Manager) startService(ctx context.Context, jobID, name string, svc ServiceConfig, networkName string) (*ServiceInstance, error) {
-	// Authenticate with the registry if credentials are provided.
-	if svc.Credentials != nil && svc.Credentials.Username != "" {
-		if err := dockerLogin(ctx, svc.Image, svc.Credentials); err != nil {
+	// Authenticate with the registry if credentials are provided,
+	// falling back to ~/.docker/config.json credentials.
+	creds := svc.Credentials
+	if (creds == nil || creds.Username == "") && m.dockerConfig != nil {
+		creds = m.dockerConfig.LookupCredentials(svc.Image)
+	}
+	if creds != nil && creds.Username != "" {
+		if err := dockerLogin(ctx, svc.Image, creds); err != nil {
 			return nil, fmt.Errorf("registry login: %w", err)
 		}
 	}

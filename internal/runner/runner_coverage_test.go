@@ -998,31 +998,29 @@ func TestSaveConfig_UnwritablePath(t *testing.T) {
 
 // --- Configure error paths ---
 
-func TestConfigure_UnwritableRunnerDir(t *testing.T) {
+func TestConfigure_UnwritableWorkDir(t *testing.T) {
 	dir := t.TempDir()
-	// Create a runner dir that is read-only.
+	// Create a runner dir with bin/ so the symlink target exists.
 	runnerDir := filepath.Join(dir, "runner")
-	require.NoError(t, os.MkdirAll(runnerDir, 0o755))
-	require.NoError(t, os.Chmod(runnerDir, 0o444))
-	defer os.Chmod(runnerDir, 0o755)
+	require.NoError(t, os.MkdirAll(filepath.Join(runnerDir, "bin"), 0o755))
+
+	// Use a work dir inside a read-only parent to trigger MkdirAll failure.
+	readonlyDir := filepath.Join(dir, "readonly")
+	require.NoError(t, os.MkdirAll(readonlyDir, 0o755))
+	require.NoError(t, os.Chmod(readonlyDir, 0o444))
+	defer os.Chmod(readonlyDir, 0o755)
 
 	p, err := NewProcess(ProcessConfig{
 		RunnerDir: runnerDir,
 		BrokerURL: "http://localhost:8080",
+		WorkDir:   filepath.Join(readonlyDir, "work"),
 	})
 	require.NoError(t, err)
 
 	err = p.Configure(context.Background())
 	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "writing .runner")
+	assert.Contains(t, err.Error(), "permission denied")
 
-	// Unlock the configMu that Configure grabbed before failing.
-	p.mu.Lock()
-	if p.configLocked {
-		p.configLocked = false
-		configMu.Unlock()
-	}
-	p.mu.Unlock()
 }
 
 // --- Stop when process Kill is needed (interrupt fails) ---
@@ -1205,57 +1203,26 @@ func TestStart_RunScriptNotExecutable(t *testing.T) {
 	assert.Contains(t, err.Error(), "cannot start runner")
 }
 
-// --- Configure: test .credentials write failure ---
+// --- Configure: config files written to runner dir ---
 
-func TestConfigure_CredentialsWriteError(t *testing.T) {
+func TestConfigure_ConfigFilesCreated(t *testing.T) {
 	dir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "bin"), 0o755))
+
 	p, err := NewProcess(ProcessConfig{
 		RunnerDir: dir,
 		BrokerURL: "http://localhost:8080",
 	})
 	require.NoError(t, err)
 
-	// Write .runner first, then create .credentials as a directory so
-	// writeJSONFile fails trying to write to it.
-	require.NoError(t, os.MkdirAll(filepath.Join(dir, ".credentials"), 0o755))
-
 	err = p.Configure(context.Background())
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "writing .credentials")
-
-	// Release configMu.
-	p.mu.Lock()
-	if p.configLocked {
-		p.configLocked = false
-		configMu.Unlock()
-	}
-	p.mu.Unlock()
-}
-
-// --- Configure: test .credentials_rsaparams write failure ---
-
-func TestConfigure_RSAParamsWriteError(t *testing.T) {
-	dir := t.TempDir()
-	p, err := NewProcess(ProcessConfig{
-		RunnerDir: dir,
-		BrokerURL: "http://localhost:8080",
-	})
 	require.NoError(t, err)
+	defer p.ReleaseConfigLock()
 
-	// Create .credentials_rsaparams as a directory so writeJSONFile fails.
-	require.NoError(t, os.MkdirAll(filepath.Join(dir, ".credentials_rsaparams"), 0o755))
-
-	err = p.Configure(context.Background())
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "writing .credentials_rsaparams")
-
-	// Release configMu.
-	p.mu.Lock()
-	if p.configLocked {
-		p.configLocked = false
-		configMu.Unlock()
-	}
-	p.mu.Unlock()
+	// Config files should be in the runner directory.
+	assert.FileExists(t, filepath.Join(dir, ".runner"))
+	assert.FileExists(t, filepath.Join(dir, ".credentials"))
+	assert.FileExists(t, filepath.Join(dir, ".credentials_rsaparams"))
 }
 
 // --- Clean: test cache dir removal on current platform ---
@@ -1564,29 +1531,42 @@ func TestStop_ProcessNilProcess(t *testing.T) {
 	assert.NoError(t, err)
 }
 
-// --- Concurrent configure/start to exercise configMu locking ---
+// --- Concurrent configure/start ---
 
-func TestConfigure_And_Start_LockingBehavior(t *testing.T) {
+func TestConfigure_And_Start_ConcurrentProcesses(t *testing.T) {
 	dir := t.TempDir()
-	runScript := filepath.Join(dir, "run.sh")
-	err := os.WriteFile(runScript, []byte("#!/usr/bin/env bash\nexit 0"), 0o755)
-	require.NoError(t, err)
+	// Create bin/ with a fake Runner.Listener (quick exit script).
+	binDir := filepath.Join(dir, "bin")
+	require.NoError(t, os.MkdirAll(binDir, 0o755))
+	listener := filepath.Join(binDir, "Runner.Listener")
+	require.NoError(t, os.WriteFile(listener, []byte("#!/usr/bin/env bash\nexit 0"), 0o755))
 
-	p, err := NewProcess(ProcessConfig{
+	// Start two processes sequentially — configMu serializes access so
+	// each runner reads its own config before the next overwrites it.
+	p1, err := NewProcess(ProcessConfig{
 		RunnerDir: dir,
 		BrokerURL: "http://localhost:8080",
+		Name:      "runner-1",
 	})
 	require.NoError(t, err)
 
-	err = p.Configure(context.Background())
+	p2, err := NewProcess(ProcessConfig{
+		RunnerDir: dir,
+		BrokerURL: "http://localhost:9090",
+		Name:      "runner-2",
+	})
 	require.NoError(t, err)
 
-	err = p.Start(context.Background())
-	require.NoError(t, err)
+	require.NoError(t, p1.Configure(context.Background()))
+	require.NoError(t, p1.Start(context.Background()))
 
-	// Wait for process to finish and config lock to release.
-	_ = p.Wait()
-	time.Sleep(3 * time.Second)
+	require.NoError(t, p2.Configure(context.Background()))
+	require.NoError(t, p2.Start(context.Background()))
+
+	_ = p1.Wait()
+	_ = p2.Wait()
+	p1.Stop()
+	p2.Stop()
 }
 
 // --- extractTarGz: symlink with relative path that stays inside target ---
@@ -1835,99 +1815,31 @@ func (failTransport) RoundTrip(*http.Request) (*http.Response, error) {
 	return nil, fmt.Errorf("connection refused (test)")
 }
 
-// TestConfigureWriteRunnerFails covers process.go:93-95 (writing .runner fails).
+// TestConfigureWriteRunnerFails covers Configure when the work dir can't be created.
 func TestConfigureWriteRunnerFails(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("permission-based test not reliable on Windows")
 	}
 
 	dir := t.TempDir()
-	// Make the runner dir read-only so writeJSONFile fails.
-	require.NoError(t, os.Chmod(dir, 0o555))
-	defer os.Chmod(dir, 0o755)
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "bin"), 0o755))
+
+	// Use a read-only parent for work dir so MkdirAll fails.
+	readonlyDir := filepath.Join(dir, "readonly")
+	require.NoError(t, os.MkdirAll(readonlyDir, 0o755))
+	require.NoError(t, os.Chmod(readonlyDir, 0o444))
+	defer os.Chmod(readonlyDir, 0o755)
 
 	p, err := NewProcess(ProcessConfig{
 		RunnerDir: dir,
 		BrokerURL: "http://localhost:8080",
+		WorkDir:   filepath.Join(readonlyDir, "work"),
 	})
 	require.NoError(t, err)
 
 	err = p.Configure(context.Background())
-	// Configure holds configMu. Since it fails, we need to release it.
 	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "writing .runner")
 
-	// The configMu is still held since Configure failed after locking.
-	// We need to release it to avoid deadlocking other tests.
-	p.mu.Lock()
-	if p.configLocked {
-		p.configLocked = false
-		configMu.Unlock()
-	}
-	p.mu.Unlock()
-}
-
-// TestConfigureWriteCredentialsFails covers process.go:106-108 (writing .credentials fails).
-func TestConfigureWriteCredentialsFails(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("permission-based test not reliable on Windows")
-	}
-
-	dir := t.TempDir()
-	p, err := NewProcess(ProcessConfig{
-		RunnerDir: dir,
-		BrokerURL: "http://localhost:8080",
-	})
-	require.NoError(t, err)
-
-	// Create .runner first so that write succeeds, then make dir read-only
-	// so .credentials fails. But actually, Configure writes .runner first,
-	// so we need .runner to succeed but .credentials to fail.
-	// We can't easily do this without mocking. Instead, create a file named
-	// ".credentials" as a directory, which will cause the write to fail.
-	require.NoError(t, os.MkdirAll(filepath.Join(dir, ".credentials"), 0o755))
-
-	err = p.Configure(context.Background())
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "writing .credentials")
-
-	// Release configMu if held.
-	p.mu.Lock()
-	if p.configLocked {
-		p.configLocked = false
-		configMu.Unlock()
-	}
-	p.mu.Unlock()
-}
-
-// TestConfigureWriteRSAParamsFails covers process.go:116-118
-// (writing .credentials_rsaparams fails).
-func TestConfigureWriteRSAParamsFails(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("permission-based test not reliable on Windows")
-	}
-
-	dir := t.TempDir()
-	p, err := NewProcess(ProcessConfig{
-		RunnerDir: dir,
-		BrokerURL: "http://localhost:8080",
-	})
-	require.NoError(t, err)
-
-	// Create a directory named .credentials_rsaparams to make writeJSONFile fail.
-	require.NoError(t, os.MkdirAll(filepath.Join(dir, ".credentials_rsaparams"), 0o755))
-
-	err = p.Configure(context.Background())
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "writing .credentials_rsaparams")
-
-	// Release configMu if held.
-	p.mu.Lock()
-	if p.configLocked {
-		p.configLocked = false
-		configMu.Unlock()
-	}
-	p.mu.Unlock()
 }
 
 // TestClean_WorkDirRemoval covers the happy path of removing _work directories

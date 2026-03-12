@@ -1,0 +1,24 @@
+name: Complex Matrix Test
+on: push
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        node: [18, 20]
+        include:
+          - os: ubuntu-latest
+            node: 20
+            coverage: true
+        exclude:
+          - os: macos-latest
+            node: 18
+    steps:
+      - run: echo "OS=${{ matrix.os }} Node=${{ matrix.node }}"
+      - run: |
+          if [ "${{ matrix.coverage }}" = "true" ]; then
+            echo "Running with coverage"
+          fi

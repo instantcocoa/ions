@@ -39,6 +39,7 @@ type Options struct {
 	Inputs          map[string]string
 	MatrixFilter    map[string]string // filter matrix combinations (e.g. os=ubuntu-latest)
 	EventPayload    map[string]any    // custom event JSON for github.event
+	EnvSecrets      map[string]map[string]string // environment name -> secrets
 	DryRun          bool
 	Verbose         bool
 	RepoPath        string
@@ -77,7 +78,17 @@ func New(opts Options) (*Orchestrator, error) {
 		opts.RepoPath = cwd
 	}
 
-	masker := NewSecretMasker(opts.Secrets)
+	// Collect all secrets (global + all environments) for the masker.
+	allSecrets := make(map[string]string, len(opts.Secrets))
+	for k, v := range opts.Secrets {
+		allSecrets[k] = v
+	}
+	for _, envSec := range opts.EnvSecrets {
+		for k, v := range envSec {
+			allSecrets[k] = v
+		}
+	}
+	masker := NewSecretMasker(allSecrets)
 
 	// Set up progress UI when stdout is a TTY and not in verbose/dry-run mode.
 	var progress *ProgressUI
@@ -607,6 +618,16 @@ func (o *Orchestrator) executeJob(
 	// The runner's built-in container support only works on Linux.
 	// When enabled, both the job container and service containers are
 	// delegated to the runner; the orchestrator does not manage them.
+	// Auto-inject a container spec for standard GitHub-hosted runner labels
+	// so the runner executes inside Docker rather than on the host.
+	if node.Job.Container == nil {
+		if img := runsOnImage(node.Job.RunsOn.Labels); img != "" {
+			o.logger.StepOutput(node.NodeID, fmt.Sprintf("using container image %s for runs-on: %s",
+				img, strings.Join(node.Job.RunsOn.Labels, ", ")))
+			node.Job.Container = &workflow.Container{Image: img}
+		}
+	}
+
 	useRunnerContainers := node.Job.Container != nil && runtime.GOOS == "linux"
 
 	if node.Job.Container != nil && runtime.GOOS != "linux" {
@@ -694,7 +715,8 @@ func (o *Orchestrator) executeJob(
 	if o.jobIDToNodeID != nil {
 		o.jobIDToNodeID.Store(msg.JobID, node.NodeID)
 	}
-	resultCh := brokerSrv.EnqueueJob(msg)
+	runnerName := "ions-" + node.NodeID
+	resultCh := brokerSrv.EnqueueJob(msg, runnerName)
 
 	// Configure and start runner process.
 	// Sanitize the node ID for filesystem use — matrix node IDs contain
@@ -869,6 +891,20 @@ func (o *Orchestrator) buildContext(
 	stepResults map[string]*ionsctx.StepResult,
 	runID string,
 ) expression.MapContext {
+	// Merge environment-specific secrets into the base secret set.
+	secrets := o.opts.Secrets
+	if node != nil && node.Job.Environment != nil && len(o.opts.EnvSecrets) > 0 {
+		if envSecrets, ok := o.opts.EnvSecrets[node.Job.Environment.Name]; ok {
+			secrets = make(map[string]string, len(o.opts.Secrets)+len(envSecrets))
+			for k, v := range o.opts.Secrets {
+				secrets[k] = v
+			}
+			for k, v := range envSecrets {
+				secrets[k] = v // environment secrets override global
+			}
+		}
+	}
+
 	opts := ionsctx.BuilderOptions{
 		RepoPath:     o.opts.RepoPath,
 		WorkflowEnv:  mergeEnv(w.Env, o.opts.Env),
@@ -876,7 +912,7 @@ func (o *Orchestrator) buildContext(
 		WorkflowName: w.Name,
 		RunID:        runID,
 		RunNumber:    1,
-		Secrets:      o.opts.Secrets,
+		Secrets:      secrets,
 		Vars:         o.opts.Vars,
 		Inputs:       o.opts.Inputs,
 		EventPayload: o.opts.EventPayload,
@@ -1077,14 +1113,26 @@ func sanitizePath(s string) string {
 	return r.Replace(s)
 }
 
+var runsOnImageMap = map[string]string{
+	"ubuntu-latest": "ubuntu:24.04",
+	"ubuntu-24.04":  "ubuntu:24.04",
+	"ubuntu-22.04":  "ubuntu:22.04",
+	"ubuntu-20.04":  "ubuntu:20.04",
+}
+
+func runsOnImage(labels []string) string {
+	if len(labels) != 1 {
+		return ""
+	}
+	return runsOnImageMap[labels[0]]
+}
+
 // copyDir recursively copies src to dst, skipping the .ions-work and .git
-// directories. Uses hardlinks when possible for performance; falls back to
-// regular copy if hardlinking fails (e.g., cross-device).
+// directories. Always uses regular copies (never hardlinks) because the
+// runner may modify or truncate workspace files, which would destroy the
+// originals if they were hardlinked.
 func copyDir(src, dst string) error {
 	src = filepath.Clean(src)
-
-	// Detect whether hardlinks work by testing once up front.
-	canHardlink := testHardlink(src, dst)
 
 	return filepath.WalkDir(src, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -1110,37 +1158,8 @@ func copyDir(src, dst string) error {
 			return os.MkdirAll(target, 0o755)
 		}
 
-		if canHardlink {
-			if err := os.Link(path, target); err == nil {
-				return nil
-			}
-		}
 		return copyFile(path, target)
 	})
-}
-
-// testHardlink checks whether hardlinking is possible between src and dst.
-// Returns false if they're on different filesystems or hardlinks aren't supported.
-func testHardlink(src, dst string) bool {
-	if err := os.MkdirAll(dst, 0o755); err != nil {
-		return false
-	}
-	probe := filepath.Join(dst, ".ions-link-test")
-	// Find any regular file in src to test with.
-	var testFile string
-	filepath.WalkDir(src, func(path string, d fs.DirEntry, err error) error {
-		if err != nil || d.IsDir() {
-			return nil
-		}
-		testFile = path
-		return filepath.SkipAll
-	})
-	if testFile == "" {
-		return false
-	}
-	err := os.Link(testFile, probe)
-	os.Remove(probe)
-	return err == nil
 }
 
 // repoInfoFromContext extracts repo info from the initial expression context

@@ -1,0 +1,16 @@
+name: Reusable Workflow Caller
+on: push
+
+jobs:
+  call-reusable:
+    uses: ./testdata/workflows/reusable-called.yml
+    with:
+      greeting: Hi
+      target: world
+    secrets: inherit
+
+  post-process:
+    needs: call-reusable
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "Reusable output was ${{ needs.call-reusable.outputs.message }}"

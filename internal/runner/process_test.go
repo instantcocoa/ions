@@ -12,6 +12,13 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestMain(m *testing.M) {
+	// Force native mode in all runner tests — these use fake bash scripts,
+	// not the real .NET binary, so Docker wrapping is not wanted.
+	needsDockerFn = func() bool { return false }
+	os.Exit(m.Run())
+}
+
 func TestNewProcess_Defaults(t *testing.T) {
 	p, err := NewProcess(ProcessConfig{
 		RunnerDir: "/tmp/runner",
@@ -65,6 +72,10 @@ func TestRunnerConfig(t *testing.T) {
 
 func TestConfigureWritesFiles(t *testing.T) {
 	dir := t.TempDir()
+
+	// Create a fake bin/ directory so the symlink target exists.
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "bin"), 0o755))
+
 	p, err := NewProcess(ProcessConfig{
 		RunnerDir: dir,
 		BrokerURL: "http://localhost:8080",
@@ -74,19 +85,15 @@ func TestConfigureWritesFiles(t *testing.T) {
 
 	err = p.Configure(context.Background())
 	require.NoError(t, err)
-	// Configure holds configMu — release it since we won't call Start.
-	p.configLocked = false
-	configMu.Unlock()
+	defer p.ReleaseConfigLock()
 
-	// Verify .runner file was created.
+	// Verify config files were created in the runner directory.
 	_, err = os.Stat(filepath.Join(dir, ".runner"))
 	assert.NoError(t, err)
 
-	// Verify .credentials file was created.
 	_, err = os.Stat(filepath.Join(dir, ".credentials"))
 	assert.NoError(t, err)
 
-	// Verify .credentials_rsaparams file was created.
 	_, err = os.Stat(filepath.Join(dir, ".credentials_rsaparams"))
 	assert.NoError(t, err)
 }
@@ -95,6 +102,7 @@ func TestRunnerEnvVars(t *testing.T) {
 	envs := runnerEnvVars()
 	assert.Contains(t, envs, "ACTIONS_RUNNER_PRINT_LOG_TO_STDOUT=1")
 	assert.Contains(t, envs, "RUNNER_ALLOW_RUNASROOT=1")
+	assert.Contains(t, envs, "DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1")
 }
 
 func TestIsRunning_NotStarted(t *testing.T) {

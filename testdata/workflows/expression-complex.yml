@@ -1,0 +1,27 @@
+name: Complex Expressions Test
+on: push
+
+env:
+  GLOBAL_VAR: hello
+
+jobs:
+  expressions:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "${{ format('Hello {0}!', 'world') }}"
+      - run: echo "${{ contains('Hello World', 'World') }}"
+      - run: echo "${{ startsWith('foobar', 'foo') }}"
+      - run: echo "${{ endsWith('foobar', 'bar') }}"
+      - run: echo "${{ join(github.event.*.name, ', ') }}"
+      - run: echo "${{ toJSON(env) }}"
+
+  conditionals:
+    needs: expressions
+    runs-on: ubuntu-latest
+    if: success()
+    steps:
+      - run: echo "Previous job succeeded"
+      - id: check
+        run: echo "result=pass" >> "$GITHUB_OUTPUT"
+      - if: steps.check.outputs.result == 'pass'
+        run: echo "Check passed"
