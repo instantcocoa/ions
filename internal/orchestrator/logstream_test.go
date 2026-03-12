@@ -2,6 +2,8 @@ package orchestrator
 
 import (
 	"bytes"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -191,4 +193,153 @@ func TestStatusIndicator(t *testing.T) {
 	assert.Equal(t, "\u2298", statusIndicator("skipped"))
 	assert.Equal(t, "\u2298", statusIndicator("cancelled"))
 	assert.Equal(t, "?", statusIndicator("unknown"))
+}
+
+func TestLogStreamer_ProblemMatcher_LoadAndMatch(t *testing.T) {
+	// Create a matcher JSON file matching Go compiler errors: file.go:10:5: message
+	matcherJSON := `{
+  "problemMatcher": [
+    {
+      "owner": "go",
+      "pattern": [
+        {
+          "regexp": "^(.+):(\\d+):(\\d+):\\s+(.+)$",
+          "file": 1,
+          "line": 2,
+          "column": 3,
+          "message": 4
+        }
+      ]
+    }
+  ]
+}`
+	dir := t.TempDir()
+	matcherPath := filepath.Join(dir, "go-matcher.json")
+	require.NoError(t, os.WriteFile(matcherPath, []byte(matcherJSON), 0644))
+
+	ls, buf := newTestStreamer(nil)
+
+	// Load matcher via ::add-matcher:: command
+	ls.StepOutput("build", "::add-matcher::"+matcherPath)
+	assert.Len(t, ls.matchers, 1)
+	assert.Equal(t, "go", ls.matchers[0].Owner)
+
+	// Feed a matching line
+	ls.StepOutput("build", "main.go:42:5: undefined: foo")
+
+	anns := ls.Annotations()
+	require.Len(t, anns, 1)
+	assert.Equal(t, "error", anns[0].Level) // default severity
+	assert.Equal(t, "main.go", anns[0].File)
+	assert.Equal(t, "42", anns[0].Line)
+	assert.Equal(t, "5", anns[0].Col)
+	assert.Equal(t, "undefined: foo", anns[0].Message)
+	assert.Equal(t, "build", anns[0].NodeID)
+
+	// The line should still appear in output
+	assert.Contains(t, buf.String(), "main.go:42:5: undefined: foo")
+}
+
+func TestLogStreamer_ProblemMatcher_WithSeverity(t *testing.T) {
+	matcherJSON := `{
+  "problemMatcher": [
+    {
+      "owner": "eslint",
+      "pattern": [
+        {
+          "regexp": "^(.+):(\\d+):(\\d+):\\s+(warning|error)\\s+(.+)$",
+          "file": 1,
+          "line": 2,
+          "column": 3,
+          "severity": 4,
+          "message": 5
+        }
+      ]
+    }
+  ]
+}`
+	dir := t.TempDir()
+	matcherPath := filepath.Join(dir, "eslint.json")
+	require.NoError(t, os.WriteFile(matcherPath, []byte(matcherJSON), 0644))
+
+	ls, _ := newTestStreamer(nil)
+	ls.StepOutput("lint", "::add-matcher::"+matcherPath)
+
+	ls.StepOutput("lint", "src/app.js:10:3: warning Unexpected console statement")
+	ls.StepOutput("lint", "src/app.js:20:1: error Missing semicolon")
+
+	anns := ls.Annotations()
+	require.Len(t, anns, 2)
+	assert.Equal(t, "warning", anns[0].Level)
+	assert.Equal(t, "error", anns[1].Level)
+}
+
+func TestLogStreamer_ProblemMatcher_RemoveMatcher(t *testing.T) {
+	matcherJSON := `{
+  "problemMatcher": [
+    {
+      "owner": "myowner",
+      "pattern": [{"regexp": "^ERROR: (.+)$", "message": 1}]
+    }
+  ]
+}`
+	dir := t.TempDir()
+	matcherPath := filepath.Join(dir, "matcher.json")
+	require.NoError(t, os.WriteFile(matcherPath, []byte(matcherJSON), 0644))
+
+	ls, _ := newTestStreamer(nil)
+	ls.StepOutput("job", "::add-matcher::"+matcherPath)
+	assert.Len(t, ls.matchers, 1)
+
+	// Feed a matching line — should produce annotation
+	ls.StepOutput("job", "ERROR: something broke")
+	require.Len(t, ls.Annotations(), 1)
+
+	// Remove matcher via ::remove-matcher owner=myowner::
+	ls.StepOutput("job", "::remove-matcher owner=myowner::")
+	assert.Len(t, ls.matchers, 0)
+
+	// Feed another matching line — should NOT produce annotation
+	ls.StepOutput("job", "ERROR: another thing")
+	assert.Len(t, ls.Annotations(), 1) // still just the one from before
+}
+
+func TestLogStreamer_ProblemMatcher_NonexistentFile(t *testing.T) {
+	ls, buf := newTestStreamer(nil)
+	// Enable verbose to see the error message
+	ls.verbose = true
+	ls.StepOutput("job", "::add-matcher::/nonexistent/matcher.json")
+	assert.Len(t, ls.matchers, 0)
+	assert.Contains(t, buf.String(), "Problem matcher load error")
+}
+
+func TestLogStreamer_ProblemMatcher_NoMatchOnNormalLine(t *testing.T) {
+	matcherJSON := `{
+  "problemMatcher": [
+    {
+      "owner": "test",
+      "pattern": [{"regexp": "^ERROR: (.+)$", "message": 1}]
+    }
+  ]
+}`
+	dir := t.TempDir()
+	matcherPath := filepath.Join(dir, "matcher.json")
+	require.NoError(t, os.WriteFile(matcherPath, []byte(matcherJSON), 0644))
+
+	ls, _ := newTestStreamer(nil)
+	ls.StepOutput("job", "::add-matcher::"+matcherPath)
+
+	ls.StepOutput("job", "this is a normal log line")
+	assert.Empty(t, ls.Annotations())
+}
+
+func TestLogStreamer_DeprecatedCommands(t *testing.T) {
+	ls, buf := newTestStreamer(nil)
+
+	ls.StepOutput("job", "::set-output name=result::value")
+	ls.StepOutput("job", "::save-state name=state::value")
+	ls.StepOutput("job", "::stop-commands::token123")
+
+	// These should be silently consumed — no output
+	assert.Empty(t, buf.String())
 }

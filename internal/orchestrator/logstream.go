@@ -1,15 +1,39 @@
 package orchestrator
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/fatih/color"
 )
+
+// ProblemMatcher defines a set of patterns for extracting annotations from log output.
+type ProblemMatcher struct {
+	Owner   string           `json:"owner"`
+	Pattern []MatcherPattern `json:"pattern"`
+}
+
+// MatcherPattern is a single regex pattern with named capture groups.
+type MatcherPattern struct {
+	Regexp   string `json:"regexp"`
+	File     int    `json:"file,omitempty"`
+	Line     int    `json:"line,omitempty"`
+	Column   int    `json:"column,omitempty"`
+	Severity int    `json:"severity,omitempty"`
+	Message  int    `json:"message,omitempty"`
+	compiled *regexp.Regexp
+}
+
+// problemMatcherFile is the JSON format for matcher files.
+type problemMatcherFile struct {
+	ProblemMatcher []ProblemMatcher `json:"problemMatcher"`
+}
 
 // JobRunResult holds the outcome of a single job execution.
 type JobRunResult struct {
@@ -26,6 +50,7 @@ type LogStreamer struct {
 	writer      io.Writer
 	colors      map[string]*color.Color
 	annotations []Annotation
+	matchers    []ProblemMatcher // active problem matchers
 	mu          sync.Mutex
 	colorIdx    int
 }
@@ -154,8 +179,35 @@ func (l *LogStreamer) StepOutput(nodeID, line string) {
 				l.masker.AddSecret(msg)
 			}
 			return
+		case "set-output", "save-state":
+			// Deprecated workflow commands — silently consumed.
+			// The runner handles these via GITHUB_OUTPUT and GITHUB_STATE files.
+			return
+		case "add-matcher":
+			if msg != "" {
+				if err := l.loadProblemMatcher(msg); err != nil && l.verbose {
+					prefix := l.jobColor(nodeID).Sprintf("[%s]", nodeID)
+					fmt.Fprintf(l.writer, "%s  Problem matcher load error: %s\n", prefix, err)
+				}
+			}
+			return
+		case "remove-matcher":
+			owner := msg
+			if v, ok := params["owner"]; ok {
+				owner = v
+			}
+			if owner != "" {
+				l.removeProblemMatcher(owner)
+			}
+			return
+		case "stop-commands":
+			// Token-based command disabling — not implemented, just log.
+			return
 		}
 	}
+
+	// Apply problem matchers to extract annotations from regular output.
+	l.applyMatchers(nodeID, trimmed)
 
 	l.writeLine(nodeID, "  "+line)
 }
@@ -314,6 +366,89 @@ func annotationLocation(ann Annotation) string {
 	}
 	loc += ")"
 	return loc
+}
+
+// loadProblemMatcher loads a problem matcher from a JSON file path.
+func (l *LogStreamer) loadProblemMatcher(path string) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("reading matcher file %s: %w", path, err)
+	}
+
+	var mf problemMatcherFile
+	if err := json.Unmarshal(data, &mf); err != nil {
+		return fmt.Errorf("parsing matcher file %s: %w", path, err)
+	}
+
+	for i := range mf.ProblemMatcher {
+		pm := &mf.ProblemMatcher[i]
+		for j := range pm.Pattern {
+			compiled, err := regexp.Compile(pm.Pattern[j].Regexp)
+			if err != nil {
+				return fmt.Errorf("compiling pattern %q in matcher %s: %w", pm.Pattern[j].Regexp, pm.Owner, err)
+			}
+			pm.Pattern[j].compiled = compiled
+		}
+		l.matchers = append(l.matchers, *pm)
+	}
+	return nil
+}
+
+// removeProblemMatcher removes all matchers with the given owner.
+func (l *LogStreamer) removeProblemMatcher(owner string) {
+	filtered := l.matchers[:0]
+	for _, m := range l.matchers {
+		if m.Owner != owner {
+			filtered = append(filtered, m)
+		}
+	}
+	l.matchers = filtered
+}
+
+// applyMatchers runs all active problem matchers against a log line.
+// Single-pattern matchers are supported (the common case). Multi-pattern
+// matchers (where patterns span consecutive lines) are not yet implemented.
+func (l *LogStreamer) applyMatchers(nodeID, line string) {
+	for _, m := range l.matchers {
+		if len(m.Pattern) == 0 {
+			continue
+		}
+		// Use only single-pattern matchers (most common).
+		p := m.Pattern[0]
+		if p.compiled == nil {
+			continue
+		}
+		matches := p.compiled.FindStringSubmatch(line)
+		if matches == nil {
+			continue
+		}
+
+		ann := Annotation{NodeID: nodeID}
+
+		// Extract fields from capture groups.
+		if p.File > 0 && p.File < len(matches) {
+			ann.File = matches[p.File]
+		}
+		if p.Line > 0 && p.Line < len(matches) {
+			ann.Line = matches[p.Line]
+		}
+		if p.Column > 0 && p.Column < len(matches) {
+			ann.Col = matches[p.Column]
+		}
+		if p.Severity > 0 && p.Severity < len(matches) {
+			ann.Level = strings.ToLower(matches[p.Severity])
+		}
+		if p.Message > 0 && p.Message < len(matches) {
+			ann.Message = matches[p.Message]
+		}
+
+		// Default severity to error if not specified by the pattern.
+		if ann.Level == "" {
+			ann.Level = "error"
+		}
+
+		l.annotations = append(l.annotations, ann)
+	}
 }
 
 func formatDuration(d time.Duration) string {
