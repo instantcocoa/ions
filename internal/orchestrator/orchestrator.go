@@ -248,11 +248,18 @@ func (o *Orchestrator) Run(ctx context.Context) (*RunResult, error) {
 
 	// Register GitHub API stub on the broker.
 	repoInfo := repoInfoFromContext(initialCtx, o.opts.RepoPath)
-	stubSrv := githubstub.NewServer(repoInfo, brokerSrv.URL(), githubstub.Options{
+	stubOpts := githubstub.Options{
 		Token:   o.opts.GitHubToken,
 		Verbose: o.opts.Verbose,
 		Vars:    o.opts.Vars,
-	})
+	}
+
+	// Enforce workflow-level permissions if declared.
+	if w.Permissions != nil {
+		stubOpts.Permissions = resolvePermissions(w.Permissions)
+	}
+
+	stubSrv := githubstub.NewServer(repoInfo, brokerSrv.URL(), stubOpts)
 	brokerSrv.RegisterRoutes(stubSrv)
 
 	if err := brokerSrv.Start(ctx); err != nil {
@@ -1428,6 +1435,22 @@ func expressionValueToListOfMaps(v expression.Value) []map[string]interface{} {
 		result = append(result, m)
 	}
 	return result
+}
+
+// resolvePermissions converts workflow.Permissions to githubstub.EffectivePermissions.
+func resolvePermissions(p *workflow.Permissions) *githubstub.EffectivePermissions {
+	if p == nil {
+		return nil
+	}
+	ep := &githubstub.EffectivePermissions{
+		ReadAll:  p.ReadAll,
+		WriteAll: p.WriteAll,
+		Scopes:   make(map[string]string, len(p.Scopes)),
+	}
+	for scope, level := range p.Scopes {
+		ep.Scopes[scope] = string(level)
+	}
+	return ep
 }
 
 // applyWorkflowDefaults merges workflow-level defaults into a job when the

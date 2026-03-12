@@ -4063,3 +4063,114 @@ func TestLogStreamer_AddMask(t *testing.T) {
 	assert.NotContains(t, output, "mysecret")
 	assert.Contains(t, output, "***")
 }
+
+// ---------------------------------------------------------------------------
+// Dry-run tests for new workflow features
+// ---------------------------------------------------------------------------
+
+func TestDryRun_Permissions(t *testing.T) {
+	wd, _ := os.Getwd()
+	projectRoot := filepath.Join(wd, "..", "..")
+	workflowPath := filepath.Join(projectRoot, "testdata", "workflows", "permissions-test.yml")
+	if _, err := os.Stat(workflowPath); os.IsNotExist(err) {
+		t.Skip("testdata not found")
+	}
+
+	o, err := New(Options{WorkflowPath: workflowPath, DryRun: true, RepoPath: projectRoot})
+	require.NoError(t, err)
+	result, err := o.Run(context.Background())
+	require.NoError(t, err)
+	assert.True(t, result.Success)
+}
+
+func TestDryRun_Defaults(t *testing.T) {
+	wd, _ := os.Getwd()
+	projectRoot := filepath.Join(wd, "..", "..")
+	workflowPath := filepath.Join(projectRoot, "testdata", "workflows", "defaults-test.yml")
+	if _, err := os.Stat(workflowPath); os.IsNotExist(err) {
+		t.Skip("testdata not found")
+	}
+
+	o, err := New(Options{WorkflowPath: workflowPath, DryRun: true, RepoPath: projectRoot})
+	require.NoError(t, err)
+	result, err := o.Run(context.Background())
+	require.NoError(t, err)
+	assert.True(t, result.Success)
+}
+
+func TestDryRun_DynamicMatrix(t *testing.T) {
+	wd, _ := os.Getwd()
+	projectRoot := filepath.Join(wd, "..", "..")
+	workflowPath := filepath.Join(projectRoot, "testdata", "workflows", "dynamic-matrix.yml")
+	if _, err := os.Stat(workflowPath); os.IsNotExist(err) {
+		t.Skip("testdata not found")
+	}
+
+	o, err := New(Options{WorkflowPath: workflowPath, DryRun: true, RepoPath: projectRoot})
+	require.NoError(t, err)
+	result, err := o.Run(context.Background())
+	require.NoError(t, err)
+	assert.True(t, result.Success)
+}
+
+func TestDryRun_Environment(t *testing.T) {
+	wd, _ := os.Getwd()
+	projectRoot := filepath.Join(wd, "..", "..")
+	workflowPath := filepath.Join(projectRoot, "testdata", "workflows", "environment.yml")
+	if _, err := os.Stat(workflowPath); os.IsNotExist(err) {
+		t.Skip("testdata not found")
+	}
+
+	o, err := New(Options{WorkflowPath: workflowPath, DryRun: true, RepoPath: projectRoot})
+	require.NoError(t, err)
+	result, err := o.Run(context.Background())
+	require.NoError(t, err)
+	assert.True(t, result.Success)
+}
+
+func TestDryRun_WorkflowCommands(t *testing.T) {
+	wd, _ := os.Getwd()
+	projectRoot := filepath.Join(wd, "..", "..")
+	workflowPath := filepath.Join(projectRoot, "testdata", "workflows", "workflow-commands.yml")
+	if _, err := os.Stat(workflowPath); os.IsNotExist(err) {
+		t.Skip("testdata not found")
+	}
+
+	o, err := New(Options{WorkflowPath: workflowPath, DryRun: true, RepoPath: projectRoot})
+	require.NoError(t, err)
+	result, err := o.Run(context.Background())
+	require.NoError(t, err)
+	assert.True(t, result.Success)
+}
+
+// ---------------------------------------------------------------------------
+// resolvePermissions
+// ---------------------------------------------------------------------------
+
+func TestResolvePermissions(t *testing.T) {
+	p := &workflow.Permissions{
+		Scopes: map[string]workflow.PermissionLevel{
+			"contents": workflow.PermissionRead,
+			"issues":   workflow.PermissionWrite,
+			"statuses": workflow.PermissionNone,
+		},
+	}
+	ep := resolvePermissions(p)
+	require.NotNil(t, ep)
+	assert.Equal(t, "read", ep.Scopes["contents"])
+	assert.Equal(t, "write", ep.Scopes["issues"])
+	assert.Equal(t, "none", ep.Scopes["statuses"])
+	assert.False(t, ep.ReadAll)
+	assert.False(t, ep.WriteAll)
+}
+
+func TestResolvePermissions_ReadAll(t *testing.T) {
+	p := &workflow.Permissions{ReadAll: true}
+	ep := resolvePermissions(p)
+	require.NotNil(t, ep)
+	assert.True(t, ep.ReadAll)
+}
+
+func TestResolvePermissions_Nil(t *testing.T) {
+	assert.Nil(t, resolvePermissions(nil))
+}

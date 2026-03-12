@@ -532,3 +532,110 @@ func TestPassthrough_WritesBlockedWithoutFlag(t *testing.T) {
 	putReq, _ := http.NewRequest(http.MethodPut, "/api/v3/repos/a/b/contents/file.txt", nil)
 	assert.False(t, srv.ProxyToGitHub(nil, putReq))
 }
+
+// ---------------------------------------------------------------------------
+// Permissions enforcement
+// ---------------------------------------------------------------------------
+
+func TestEffectivePermissions_HasPermission(t *testing.T) {
+	tests := []struct {
+		name   string
+		ep     *EffectivePermissions
+		scope  string
+		level  string
+		expect bool
+	}{
+		{"nil permissions allow all", nil, "issues", "write", true},
+		{"write-all allows everything", &EffectivePermissions{WriteAll: true}, "checks", "write", true},
+		{"read-all allows read", &EffectivePermissions{ReadAll: true}, "issues", "read", true},
+		{"read-all denies write", &EffectivePermissions{ReadAll: true}, "issues", "write", false},
+		{"explicit write allows write", &EffectivePermissions{Scopes: map[string]string{"issues": "write"}}, "issues", "write", true},
+		{"explicit write allows read", &EffectivePermissions{Scopes: map[string]string{"issues": "write"}}, "issues", "read", true},
+		{"explicit read denies write", &EffectivePermissions{Scopes: map[string]string{"issues": "read"}}, "issues", "write", false},
+		{"explicit none denies read", &EffectivePermissions{Scopes: map[string]string{"issues": "none"}}, "issues", "read", false},
+		{"missing scope denied", &EffectivePermissions{Scopes: map[string]string{"checks": "write"}}, "issues", "read", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := tt.ep.HasPermission(tt.scope, tt.level)
+			assert.Equal(t, tt.expect, got)
+		})
+	}
+}
+
+func TestRequiredPermission(t *testing.T) {
+	tests := []struct {
+		method string
+		path   string
+		scope  string
+		level  string
+	}{
+		{"POST", "/api/v3/repos/o/r/statuses/abc", "statuses", "write"},
+		{"GET", "/api/v3/repos/o/r/statuses/abc", "statuses", "read"},
+		{"POST", "/api/v3/repos/o/r/check-runs", "checks", "write"},
+		{"GET", "/api/v3/repos/o/r/check-runs/1", "checks", "read"},
+		{"POST", "/api/v3/repos/o/r/issues/1/comments", "issues", "write"},
+		{"GET", "/api/v3/repos/o/r/issues/1", "issues", "read"},
+		{"GET", "/api/v3/repos/o/r/pulls/1", "pull-requests", "read"},
+		{"POST", "/api/v3/repos/o/r/dispatches", "actions", "write"},
+		{"GET", "/api/v3/repos/o/r/actions/variables", "actions", "read"},
+		{"GET", "/api/v3/repos/o/r", "metadata", "read"},
+		{"GET", "/not-api/path", "", ""},
+	}
+	for _, tt := range tests {
+		scope, level := requiredPermission(tt.method, tt.path)
+		assert.Equal(t, tt.scope, scope, "%s %s", tt.method, tt.path)
+		assert.Equal(t, tt.level, level, "%s %s", tt.method, tt.path)
+	}
+}
+
+func TestPermissions_Enforcement(t *testing.T) {
+	// Create a server with read-only issues permission.
+	ts := setupTestServer(RepoInfo{Owner: "test", Repo: "repo"}, Options{
+		Permissions: &EffectivePermissions{
+			Scopes: map[string]string{
+				"metadata": "read",
+				"issues":   "read",
+			},
+		},
+	})
+	defer ts.Close()
+
+	// GET on issues should work.
+	code, _ := getJSON(t, ts, "/api/v3/repos/test/repo/issues/1")
+	assert.Equal(t, http.StatusOK, code)
+
+	// POST on issues should be denied (requires write).
+	resp, err := http.Post(ts.URL+"/api/v3/repos/test/repo/issues/1/comments", "application/json", strings.NewReader(`{"body":"test"}`))
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	assert.Equal(t, http.StatusForbidden, resp.StatusCode)
+
+	// GET on repo should work (metadata:read).
+	code, _ = getJSON(t, ts, "/api/v3/repos/test/repo")
+	assert.Equal(t, http.StatusOK, code)
+}
+
+func TestPermissions_WriteAllAllowsEverything(t *testing.T) {
+	ts := setupTestServer(RepoInfo{Owner: "test", Repo: "repo"}, Options{
+		Permissions: &EffectivePermissions{WriteAll: true},
+	})
+	defer ts.Close()
+
+	// POST on statuses should work with write-all.
+	resp, err := http.Post(ts.URL+"/api/v3/repos/test/repo/statuses/abc", "application/json", strings.NewReader(`{"state":"success"}`))
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	assert.Equal(t, http.StatusCreated, resp.StatusCode)
+}
+
+func TestPermissions_NilAllowsAll(t *testing.T) {
+	// No permissions set = everything allowed (default).
+	ts := setupTestServer(RepoInfo{Owner: "test", Repo: "repo"})
+	defer ts.Close()
+
+	resp, err := http.Post(ts.URL+"/api/v3/repos/test/repo/statuses/abc", "application/json", strings.NewReader(`{"state":"success"}`))
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	assert.Equal(t, http.StatusCreated, resp.StatusCode)
+}

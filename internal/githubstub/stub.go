@@ -29,6 +29,41 @@ type Options struct {
 	Verbose     bool              // log all requests
 	Vars        map[string]string // --var values for actions/variables endpoint
 	ProxyWrites bool              // also proxy POST/PATCH/PUT to real GitHub API
+	Permissions *EffectivePermissions // enforced permission scopes (nil = allow all)
+}
+
+// EffectivePermissions represents the resolved permissions for a job.
+// When set, API requests that require a scope not granted here are rejected with 403.
+type EffectivePermissions struct {
+	ReadAll  bool
+	WriteAll bool
+	Scopes   map[string]string // scope -> "read" | "write" | "none"
+}
+
+// HasPermission checks if the given scope is allowed at the required level.
+// Returns true if: WriteAll is set, or ReadAll is set and level is "read",
+// or the scope is explicitly granted at or above the required level.
+func (ep *EffectivePermissions) HasPermission(scope, level string) bool {
+	if ep == nil {
+		return true // no permissions configured = allow all
+	}
+	if ep.WriteAll {
+		return true
+	}
+	if ep.ReadAll && level == "read" {
+		return true
+	}
+	granted, ok := ep.Scopes[scope]
+	if !ok {
+		return false
+	}
+	if granted == "none" {
+		return false
+	}
+	if level == "read" {
+		return granted == "read" || granted == "write"
+	}
+	return granted == "write"
 }
 
 // Server implements a local stub of the GitHub REST API.
@@ -97,7 +132,7 @@ func (s *Server) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/graphql", wrap(s.handleGraphQL))
 }
 
-// middleware adds rate-limit headers and optional request logging.
+// middleware adds rate-limit headers, optional request logging, and permission checks.
 func (s *Server) middleware(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		// Add rate limit headers that some actions check.
@@ -111,8 +146,89 @@ func (s *Server) middleware(next http.HandlerFunc) http.HandlerFunc {
 			log.Printf("[github-stub] %s %s", r.Method, r.URL.Path)
 		}
 
+		// Enforce permissions if configured.
+		if s.opts.Permissions != nil {
+			scope, level := requiredPermission(r.Method, r.URL.Path)
+			if scope != "" && !s.opts.Permissions.HasPermission(scope, level) {
+				log.Printf("[github-stub] permission denied: %s %s requires %s:%s", r.Method, r.URL.Path, scope, level)
+				writeJSON(w, http.StatusForbidden, map[string]any{
+					"message": fmt.Sprintf("Resource not accessible by integration — requires %s: %s permission", scope, level),
+				})
+				return
+			}
+		}
+
 		next(w, r)
 	}
+}
+
+// requiredPermission maps an HTTP method + path to the required permission scope and level.
+// Returns ("", "") for endpoints that don't require specific permissions.
+func requiredPermission(method, path string) (scope, level string) {
+	// Non-API paths don't need permissions.
+	if !strings.HasPrefix(path, "/api/v3/") {
+		return "", ""
+	}
+
+	// Statuses API.
+	if strings.Contains(path, "/statuses/") {
+		if method == http.MethodPost {
+			return "statuses", "write"
+		}
+		return "statuses", "read"
+	}
+
+	// Check runs API.
+	if strings.Contains(path, "/check-runs") || strings.Contains(path, "/check-suites") {
+		if method == http.MethodPost || method == http.MethodPatch {
+			return "checks", "write"
+		}
+		return "checks", "read"
+	}
+
+	// Issues / comments API.
+	if strings.Contains(path, "/issues") {
+		if method == http.MethodPost || method == http.MethodPatch || method == http.MethodDelete {
+			return "issues", "write"
+		}
+		return "issues", "read"
+	}
+
+	// Pull requests API.
+	if strings.Contains(path, "/pulls") {
+		if method == http.MethodPost || method == http.MethodPatch || method == http.MethodPut {
+			return "pull-requests", "write"
+		}
+		return "pull-requests", "read"
+	}
+
+	// Contents API.
+	if strings.Contains(path, "/contents/") || strings.Contains(path, "/git/") {
+		if method == http.MethodPut || method == http.MethodPost || method == http.MethodDelete {
+			return "contents", "write"
+		}
+		return "contents", "read"
+	}
+
+	// Dispatches (workflow_dispatch).
+	if strings.Contains(path, "/dispatches") {
+		return "actions", "write"
+	}
+
+	// Actions variables.
+	if strings.Contains(path, "/actions/variables") {
+		return "actions", "read"
+	}
+
+	// Repository metadata.
+	if strings.Contains(path, "/repos/") {
+		if method == http.MethodGet {
+			return "metadata", "read"
+		}
+	}
+
+	// Default: no specific permission required.
+	return "", ""
 }
 
 // handleCatchAll responds to any unhandled API endpoint.

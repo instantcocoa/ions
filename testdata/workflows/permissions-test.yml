@@ -1,0 +1,14 @@
+name: Permissions Test
+on: push
+
+permissions:
+  contents: read
+  issues: write
+  statuses: none
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "Workflow has scoped permissions"
+      - run: echo "contents=read, issues=write, statuses=none"

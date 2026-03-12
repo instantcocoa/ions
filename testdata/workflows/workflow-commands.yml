@@ -1,0 +1,26 @@
+name: Workflow Commands Test
+on: push
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Annotations
+        run: |
+          echo "::notice::This is a notice"
+          echo "::warning::This is a warning"
+          echo "::error file=main.go,line=10,col=5::Build failed"
+
+      - name: Grouping
+        run: |
+          echo "::group::Install dependencies"
+          echo "npm install"
+          echo "::endgroup::"
+
+      - name: Debug
+        run: echo "::debug::Debug information"
+
+      - name: Masking
+        run: |
+          echo "::add-mask::my-secret-value"
+          echo "The value my-secret-value should be masked"

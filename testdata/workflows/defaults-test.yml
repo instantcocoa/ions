@@ -1,0 +1,21 @@
+name: Defaults Test
+on: push
+
+defaults:
+  run:
+    shell: bash
+    working-directory: ./src
+
+jobs:
+  inherit:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "Should use bash shell and ./src working directory"
+
+  override:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: sh
+    steps:
+      - run: echo "Should use sh shell but inherit ./src working directory"

@@ -1,0 +1,10 @@
+name: Dynamic Matrix Test
+on: push
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix: ${{ fromJSON('{"os":["ubuntu","macos"],"node":["18","20"]}') }}
+    steps:
+      - run: echo "OS=${{ matrix.os }} Node=${{ matrix.node }}"
