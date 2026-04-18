@@ -1429,7 +1429,7 @@ func TestBuildContext_MinimalWorkflow(t *testing.T) {
 
 	w := &workflow.Workflow{
 		Name: "Test Workflow",
-		Env:  map[string]string{"WF_ENV": "wfval"},
+		Env:  workflow.EnvMap{Values: map[string]string{"WF_ENV": "wfval"}},
 	}
 
 	ctx := o.buildContext(w, nil, nil, nil, "run123")
@@ -1461,7 +1461,7 @@ func TestBuildContext_WithNode(t *testing.T) {
 		Name: "Test",
 		Jobs: map[string]*workflow.Job{
 			"build": {
-				Env:   map[string]string{"JOB_ENV": "jobval"},
+				Env:   workflow.EnvMap{Values: map[string]string{"JOB_ENV": "jobval"}},
 				Needs: []string{"lint"},
 			},
 		},
@@ -1551,7 +1551,7 @@ func TestBuildContext_EnvMergesWorkflowAndOpts(t *testing.T) {
 
 	w := &workflow.Workflow{
 		Name: "Test",
-		Env:  map[string]string{"WF_ENV": "wfval", "SHARED": "from-wf"},
+		Env:  workflow.EnvMap{Values: map[string]string{"WF_ENV": "wfval", "SHARED": "from-wf"}},
 	}
 
 	ctx := o.buildContext(w, nil, nil, nil, "run1")
@@ -2850,14 +2850,14 @@ func TestBuildContext_AllOptionsSet(t *testing.T) {
 
 	w := &workflow.Workflow{
 		Name: "Full Workflow",
-		Env:  map[string]string{"WE": "wv"},
+		Env:  workflow.EnvMap{Values: map[string]string{"WE": "wv"}},
 	}
 
 	node := &graph.JobNode{
 		NodeID: "build",
 		JobID:  "build",
 		Job: &workflow.Job{
-			Env:   map[string]string{"JE": "jv"},
+			Env:   workflow.EnvMap{Values: map[string]string{"JE": "jv"}},
 			Needs: []string{},
 		},
 		MatrixValues: graph.MatrixCombination{"os": "linux", "ver": "3"},

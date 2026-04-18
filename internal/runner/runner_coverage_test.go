@@ -1219,10 +1219,10 @@ func TestConfigure_ConfigFilesCreated(t *testing.T) {
 	require.NoError(t, err)
 	defer p.ReleaseConfigLock()
 
-	// Config files should be in the runner directory.
-	assert.FileExists(t, filepath.Join(dir, ".runner"))
-	assert.FileExists(t, filepath.Join(dir, ".credentials"))
-	assert.FileExists(t, filepath.Join(dir, ".credentials_rsaparams"))
+	// Config files should be in the per-process instance directory.
+	assert.FileExists(t, filepath.Join(p.Dir(), ".runner"))
+	assert.FileExists(t, filepath.Join(p.Dir(), ".credentials"))
+	assert.FileExists(t, filepath.Join(p.Dir(), ".credentials_rsaparams"))
 }
 
 // --- Clean: test cache dir removal on current platform ---

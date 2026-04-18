@@ -27,6 +27,12 @@ func main() {
 	root := &cobra.Command{
 		Use:   "ions",
 		Short: "Local GitHub Actions runner with high-fidelity execution",
+
+		// Suppress the full flag help on runtime errors. Usage only
+		// prints on argument-parse errors, which is what users expect
+		// — a failed workflow run shouldn't drown out the error with
+		// a wall of flag documentation.
+		SilenceUsage: true,
 	}
 
 	root.PersistentFlags().BoolVarP(&verbose, "verbose", "v", false, "verbose output")
@@ -201,10 +207,14 @@ func runCmd() *cobra.Command {
 		jsonOutput      bool
 		eventPayload    string
 		artifactDir     string
-		reuseContainers bool
-		platform        string
-		githubToken     string
-		watch           bool
+		reuseContainers   bool
+		platform          string
+		githubToken       string
+		watch               bool
+		allowHostFallback   bool
+		brokerBindAddr      string
+		brokerExternalHost  string
+		runnerImage         string
 	)
 
 	cmd := &cobra.Command{
@@ -282,9 +292,13 @@ and runs the first one found (or lists them if multiple exist).`,
 				DryRun:          dryRun,
 				Verbose:         verbose,
 				ArtifactDir:     artifactDir,
-				ReuseContainers: reuseContainers,
-				Platform:        platform,
-				GitHubToken:     token,
+				ReuseContainers:   reuseContainers,
+				Platform:          platform,
+				GitHubToken:       token,
+				AllowHostFallback:  allowHostFallback,
+				BrokerBindAddr:     brokerBindAddr,
+				BrokerExternalHost: brokerExternalHost,
+				RunnerImage:        runnerImage,
 			}
 
 			if watch {
@@ -338,6 +352,10 @@ and runs the first one found (or lists them if multiple exist).`,
 	cmd.Flags().StringVar(&eventPayload, "event-payload", "", "path to JSON file with custom event payload for github.event")
 	cmd.Flags().StringVar(&artifactDir, "artifact-dir", "", "override artifact storage location")
 	cmd.Flags().BoolVar(&reuseContainers, "reuse-containers", false, "don't remove containers after run (debugging)")
+	cmd.Flags().BoolVar(&allowHostFallback, "allow-host-fallback", false, "on darwin, run Linux-container jobs on the host instead of failing")
+	cmd.Flags().StringVar(&brokerBindAddr, "broker-bind", "", "broker TCP bind address (default 127.0.0.1:0; use 0.0.0.0:0 in docker)")
+	cmd.Flags().StringVar(&brokerExternalHost, "broker-host", "", "hostname job containers use to reach the broker (e.g. host.docker.internal)")
+	cmd.Flags().StringVar(&runnerImage, "runner-image", "", "container image for runs-on: ubuntu-* (default ubuntu:24.04; try ghcr.io/catthehacker/ubuntu:act-24.04 for preinstalled CI tools)")
 	cmd.Flags().StringVar(&platform, "platform", "", "override platform detection (e.g. linux/amd64)")
 	cmd.Flags().StringVar(&githubToken, "github-token", "", "GitHub token for API passthrough (optional)")
 	cmd.Flags().StringSliceVar(&envSecrets, "env-secret", nil, "environment secret ENV:KEY=VALUE (repeatable)")
@@ -514,7 +532,7 @@ func statusCmd() *cobra.Command {
 				fmt.Printf(" cannot initialize runner manager: %v\n", err)
 			} else {
 				ver, err := mgr.InstalledVersion()
-				if err != nil {
+				if err != nil || ver == "" {
 					red.Printf("  ✗")
 					fmt.Println(" not installed")
 					fmt.Println("  Run: ions runner install --latest")

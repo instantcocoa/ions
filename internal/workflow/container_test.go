@@ -14,7 +14,7 @@ func TestContainer_StringImage(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "node:20", c.Image)
 	assert.Nil(t, c.Credentials)
-	assert.Nil(t, c.Env)
+	assert.Nil(t, c.Env.Values)
 	assert.Nil(t, c.Ports)
 	assert.Nil(t, c.Volumes)
 	assert.Empty(t, c.Options)
@@ -45,7 +45,7 @@ options: --health-cmd pg_isready
 	assert.Equal(t, map[string]string{
 		"POSTGRES_PASSWORD": "postgres",
 		"POSTGRES_DB":       "test",
-	}, c.Env)
+	}, c.Env.Values)
 	assert.Equal(t, []string{"5432:5432"}, c.Ports)
 	assert.Equal(t, []string{"/data:/var/lib/postgresql/data"}, c.Volumes)
 	assert.Equal(t, "--health-cmd pg_isready", c.Options)
@@ -117,7 +117,7 @@ redis: redis:7
 
 	require.Contains(t, services, "postgres")
 	assert.Equal(t, "postgres:15", services["postgres"].Image)
-	assert.Equal(t, "postgres", services["postgres"].Env["POSTGRES_PASSWORD"])
+	assert.Equal(t, "postgres", services["postgres"].Env.Values["POSTGRES_PASSWORD"])
 
 	require.Contains(t, services, "redis")
 	assert.Equal(t, "redis:7", services["redis"].Image)

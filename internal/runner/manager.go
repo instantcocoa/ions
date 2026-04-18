@@ -256,13 +256,45 @@ func (m *Manager) LatestVersion(ctx context.Context) (string, error) {
 	return strings.TrimPrefix(release.TagName, "v"), nil
 }
 
-// InstalledVersion returns the currently installed runner version, or empty string if none.
+// InstalledVersion returns the currently installed runner version, or an
+// error if none. Falls back to scanning the runner directory for
+// version-named subdirectories when the config file is missing or has an
+// empty InstalledVersion (which happens when an older ions wrote the
+// config without this field).
 func (m *Manager) InstalledVersion() (string, error) {
 	cfg, err := m.loadConfig()
+	if err == nil && cfg.InstalledVersion != "" {
+		return cfg.InstalledVersion, nil
+	}
+
+	runnerRoot := filepath.Join(m.baseDir, "runner")
+	entries, dirErr := os.ReadDir(runnerRoot)
+	if dirErr != nil {
+		if err != nil {
+			return "", err
+		}
+		return "", dirErr
+	}
+	var found string
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		if len(name) == 0 || (name[0] < '0' || name[0] > '9') {
+			continue
+		}
+		if name > found {
+			found = name
+		}
+	}
+	if found != "" {
+		return found, nil
+	}
 	if err != nil {
 		return "", err
 	}
-	return cfg.InstalledVersion, nil
+	return "", nil
 }
 
 // platformString returns the runner platform name for the current OS.

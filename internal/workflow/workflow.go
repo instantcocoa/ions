@@ -5,7 +5,7 @@ type Workflow struct {
 	Name        string            `yaml:"name"`
 	RunName     string            `yaml:"run-name,omitempty"`
 	On          Triggers          `yaml:"on"`
-	Env         map[string]string `yaml:"env,omitempty"`
+	Env         EnvMap            `yaml:"env,omitempty"`
 	Defaults    *Defaults         `yaml:"defaults,omitempty"`
 	Concurrency *Concurrency      `yaml:"concurrency,omitempty"`
 	Permissions *Permissions      `yaml:"permissions,omitempty"`
@@ -22,7 +22,7 @@ type Job struct {
 	Environment     *Environment           `yaml:"environment,omitempty"`
 	Concurrency     *Concurrency           `yaml:"concurrency,omitempty"`
 	Outputs         map[string]JobOutput   `yaml:"outputs,omitempty"`
-	Env             map[string]string      `yaml:"env,omitempty"`
+	Env             EnvMap                 `yaml:"env,omitempty"`
 	Defaults        *Defaults              `yaml:"defaults,omitempty"`
 	Strategy        *Strategy              `yaml:"strategy,omitempty"`
 	Container       *Container             `yaml:"container,omitempty"`
@@ -45,7 +45,7 @@ type Step struct {
 	Run              string            `yaml:"run,omitempty"`
 	Shell            string            `yaml:"shell,omitempty"`
 	With             map[string]string `yaml:"with,omitempty"`
-	Env              map[string]string `yaml:"env,omitempty"`
+	Env              EnvMap            `yaml:"env,omitempty"`
 	ContinueOnError  ExprBool          `yaml:"continue-on-error,omitempty"`
 	TimeoutMinutes   *int              `yaml:"timeout-minutes,omitempty"`
 	WorkingDirectory string            `yaml:"working-directory,omitempty"`

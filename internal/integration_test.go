@@ -49,7 +49,7 @@ func TestIntegration_MultiJob(t *testing.T) {
 	assert.Empty(t, errs)
 
 	// Check workflow env
-	assert.Equal(t, "global-value", w.Env["GLOBAL_VAR"])
+	assert.Equal(t, "global-value", w.Env.Values["GLOBAL_VAR"])
 
 	// Check job dependencies
 	buildJob := w.Jobs["build"]
@@ -231,7 +231,7 @@ func TestIntegration_Services(t *testing.T) {
 	// Services
 	require.NotNil(t, job.Services["postgres"])
 	assert.Equal(t, "postgres:15", job.Services["postgres"].Image)
-	assert.Equal(t, "postgres", job.Services["postgres"].Env["POSTGRES_PASSWORD"])
+	assert.Equal(t, "postgres", job.Services["postgres"].Env.Values["POSTGRES_PASSWORD"])
 
 	require.NotNil(t, job.Services["redis"])
 	assert.Equal(t, "redis:7", job.Services["redis"].Image)

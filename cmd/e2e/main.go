@@ -229,10 +229,10 @@ func buildJobContext(w *workflow.Workflow, node *graph.JobNode, brokerURL string
 
 	// Build env context from workflow-level and job-level env.
 	envMap := make(map[string]expression.Value)
-	for k, v := range w.Env {
+	for k, v := range w.Env.Values {
 		envMap[k] = expression.String(v)
 	}
-	for k, v := range node.Job.Env {
+	for k, v := range node.Job.Env.Values {
 		envMap[k] = expression.String(v)
 	}
 

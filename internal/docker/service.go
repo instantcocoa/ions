@@ -3,6 +3,7 @@ package docker
 import (
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 )
@@ -51,18 +52,33 @@ func (m *Manager) SetupServices(ctx context.Context, jobID string, services map[
 func (m *Manager) startService(ctx context.Context, jobID, name string, svc ServiceConfig, networkName string) (*ServiceInstance, error) {
 	// Authenticate with the registry if credentials are provided,
 	// falling back to ~/.docker/config.json credentials.
+	//
+	// Login failures are non-fatal: public images can still be pulled
+	// anonymously, so we let the pull attempt run regardless and only
+	// surface a failure if that also fails.
 	creds := svc.Credentials
-	if (creds == nil || creds.Username == "") && m.dockerConfig != nil {
+	if (creds == nil || creds.Username == "" || creds.Password == "") && m.dockerConfig != nil {
 		creds = m.dockerConfig.LookupCredentials(svc.Image)
 	}
-	if creds != nil && creds.Username != "" {
+	if creds != nil && creds.Username != "" && creds.Password != "" {
 		if err := dockerLogin(ctx, svc.Image, creds); err != nil {
-			return nil, fmt.Errorf("registry login: %w", err)
+			fmt.Fprintf(os.Stderr, "warning: registry login failed for %s (%v) — continuing with anonymous pull\n", svc.Image, err)
 		}
 	}
 
-	// Pull image (best-effort — may already be cached).
-	_, _ = dockerCmd(ctx, "pull", svc.Image)
+	// Pull image. For public images this succeeds without login; for
+	// private images this is where the real auth failure surfaces.
+	if _, err := dockerCmd(ctx, "pull", svc.Image); err != nil {
+		msg := strings.ToLower(err.Error())
+		if strings.Contains(msg, "unauthorized") || strings.Contains(msg, "denied") {
+			hint := "\n  hint: the registry requires authentication. Configure `docker login` or provide credentials via services.<name>.credentials."
+			if strings.HasPrefix(svc.Image, "ghcr.io/") {
+				hint = "\n  hint: this ghcr.io image requires a GitHub token with read:packages. Pass --secret GITHUB_TOKEN=<PAT> to ions run, or `docker login ghcr.io` first."
+			}
+			return nil, fmt.Errorf("pull image %s: registry denied access — the image appears to be private%s", svc.Image, hint)
+		}
+		return nil, fmt.Errorf("pull image %s: %w", svc.Image, err)
+	}
 
 	containerName := fmt.Sprintf("ions-%s-%s", jobID, name)
 

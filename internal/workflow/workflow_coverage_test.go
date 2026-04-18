@@ -323,7 +323,7 @@ jobs:
 
 	assert.Equal(t, "Full Workflow", w.Name)
 	assert.Equal(t, "Build ${{ github.ref_name }}", w.RunName)
-	assert.Equal(t, "value", w.Env["GLOBAL_KEY"])
+	assert.Equal(t, "value", w.Env.Values["GLOBAL_KEY"])
 	require.NotNil(t, w.Defaults)
 	assert.Equal(t, "bash", w.Defaults.Run.Shell)
 	require.NotNil(t, w.Concurrency)
@@ -345,13 +345,13 @@ jobs:
 	assert.True(t, job.Permissions.ReadAll)
 	require.NotNil(t, job.Defaults)
 	assert.Equal(t, "pwsh", job.Defaults.Run.Shell)
-	assert.Equal(t, "job-value", job.Env["JOB_KEY"])
+	assert.Equal(t, "job-value", job.Env.Values["JOB_KEY"])
 
 	step := job.Steps[0]
 	assert.Equal(t, "ver", step.ID)
 	assert.Equal(t, "bash", step.Shell)
 	assert.Equal(t, "./app", step.WorkingDirectory)
-	assert.Equal(t, "step-value", step.Env["STEP_KEY"])
+	assert.Equal(t, "step-value", step.Env.Values["STEP_KEY"])
 	require.NotNil(t, step.TimeoutMinutes)
 	assert.Equal(t, 5, *step.TimeoutMinutes)
 	assert.True(t, step.ContinueOnError.Value)

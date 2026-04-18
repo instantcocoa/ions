@@ -25,8 +25,9 @@ func TestNewProcess_Defaults(t *testing.T) {
 		BrokerURL: "http://localhost:8080",
 	})
 	require.NoError(t, err)
+	defer p.cleanupInstance()
 	assert.Equal(t, "ions-runner", p.name)
-	assert.Equal(t, filepath.Join("/tmp/runner", "_work"), p.workDir)
+	assert.Equal(t, filepath.Join(p.Dir(), "_work"), p.workDir)
 	assert.Equal(t, "http://localhost:8080", p.brokerURL)
 }
 
@@ -87,14 +88,14 @@ func TestConfigureWritesFiles(t *testing.T) {
 	require.NoError(t, err)
 	defer p.ReleaseConfigLock()
 
-	// Verify config files were created in the runner directory.
-	_, err = os.Stat(filepath.Join(dir, ".runner"))
+	// Verify config files were created in the per-process instance directory.
+	_, err = os.Stat(filepath.Join(p.Dir(), ".runner"))
 	assert.NoError(t, err)
 
-	_, err = os.Stat(filepath.Join(dir, ".credentials"))
+	_, err = os.Stat(filepath.Join(p.Dir(), ".credentials"))
 	assert.NoError(t, err)
 
-	_, err = os.Stat(filepath.Join(dir, ".credentials_rsaparams"))
+	_, err = os.Stat(filepath.Join(p.Dir(), ".credentials_rsaparams"))
 	assert.NoError(t, err)
 }
 

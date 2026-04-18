@@ -56,13 +56,13 @@ func TestParse_MultiJob(t *testing.T) {
 	assert.Equal(t, []string{"main"}, push.Branches)
 
 	// Global env
-	assert.Equal(t, "global-value", w.Env["GLOBAL_VAR"])
+	assert.Equal(t, "global-value", w.Env.Values["GLOBAL_VAR"])
 
 	// Build job
 	require.Contains(t, w.Jobs, "build")
 	build := w.Jobs["build"]
 	assert.Equal(t, []string{"ubuntu-latest"}, build.RunsOn.Labels)
-	assert.Equal(t, "production", build.Env["BUILD_ENV"])
+	assert.Equal(t, "production", build.Env.Values["BUILD_ENV"])
 	require.Contains(t, build.Outputs, "artifact-path")
 	assert.Equal(t, "${{ steps.build-step.outputs.path }}", build.Outputs["artifact-path"].Value)
 
@@ -221,8 +221,8 @@ func TestParse_Services(t *testing.T) {
 	require.Contains(t, job.Services, "postgres")
 	pg := job.Services["postgres"]
 	assert.Equal(t, "postgres:15", pg.Image)
-	assert.Equal(t, "postgres", pg.Env["POSTGRES_PASSWORD"])
-	assert.Equal(t, "test", pg.Env["POSTGRES_DB"])
+	assert.Equal(t, "postgres", pg.Env.Values["POSTGRES_PASSWORD"])
+	assert.Equal(t, "test", pg.Env.Values["POSTGRES_DB"])
 	assert.Equal(t, []string{"5432:5432"}, pg.Ports)
 	assert.Contains(t, pg.Options, "--health-cmd pg_isready")
 
@@ -234,7 +234,7 @@ func TestParse_Services(t *testing.T) {
 	// Container
 	require.NotNil(t, job.Container)
 	assert.Equal(t, "node:20", job.Container.Image)
-	assert.Equal(t, "postgres://postgres:postgres@postgres:5432/test", job.Container.Env["DATABASE_URL"])
+	assert.Equal(t, "postgres://postgres:postgres@postgres:5432/test", job.Container.Env.Values["DATABASE_URL"])
 
 	// Defaults
 	require.NotNil(t, job.Defaults)
@@ -246,7 +246,7 @@ func TestParse_Services(t *testing.T) {
 	require.Len(t, job.Steps, 2)
 	assert.Equal(t, "actions/checkout@v4", job.Steps[0].Uses)
 	assert.Equal(t, "npm test", job.Steps[1].Run)
-	assert.Equal(t, "redis://redis:6379", job.Steps[1].Env["REDIS_URL"])
+	assert.Equal(t, "redis://redis:6379", job.Steps[1].Env.Values["REDIS_URL"])
 
 	// Validate
 	errs := Validate(w)
@@ -425,7 +425,7 @@ jobs:
 	assert.Equal(t, "node:18", job.Container.Image)
 	assert.Equal(t, "/usr/local/bin/node", job.Container.Entrypoint)
 	assert.Equal(t, "--version", job.Container.Args)
-	assert.Equal(t, "production", job.Container.Env["NODE_ENV"])
+	assert.Equal(t, "production", job.Container.Env.Values["NODE_ENV"])
 }
 
 func TestParse_ServiceContainerEntrypoint(t *testing.T) {

@@ -2,6 +2,7 @@ package workflow
 
 import (
 	"fmt"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -20,6 +21,14 @@ type Matrix struct {
 	Include    []map[string]interface{}
 	Exclude    []map[string]interface{}
 	Expression string // if the entire matrix is an expression like ${{ fromJSON(...) }}
+
+	// Per-field expression forms. GitHub permits `matrix.<dim>: ${{ ... }}`
+	// and `matrix.include: ${{ ... }}` where the expression evaluates to a
+	// sequence. These are resolved before graph.Build() and promoted into
+	// Dimensions / Include / Exclude.
+	DimensionExpressions map[string]string
+	IncludeExpression    string
+	ExcludeExpression    string
 }
 
 // UnmarshalYAML handles both expression string and mapping forms.
@@ -39,19 +48,33 @@ func (m *Matrix) UnmarshalYAML(value *yaml.Node) error {
 
 			switch key {
 			case "include":
+				if isExpressionScalar(valNode) {
+					m.IncludeExpression = valNode.Value
+					break
+				}
 				entries, err := decodeListOfMaps(valNode)
 				if err != nil {
 					return fmt.Errorf("Matrix: failed to decode include: %w", err)
 				}
 				m.Include = entries
 			case "exclude":
+				if isExpressionScalar(valNode) {
+					m.ExcludeExpression = valNode.Value
+					break
+				}
 				entries, err := decodeListOfMaps(valNode)
 				if err != nil {
 					return fmt.Errorf("Matrix: failed to decode exclude: %w", err)
 				}
 				m.Exclude = entries
 			default:
-				// Dimension: a list of values
+				if isExpressionScalar(valNode) {
+					if m.DimensionExpressions == nil {
+						m.DimensionExpressions = make(map[string]string)
+					}
+					m.DimensionExpressions[key] = valNode.Value
+					break
+				}
 				vals, err := decodeDimensionValues(valNode)
 				if err != nil {
 					return fmt.Errorf("Matrix: failed to decode dimension %q: %w", key, err)
@@ -63,6 +86,15 @@ func (m *Matrix) UnmarshalYAML(value *yaml.Node) error {
 	default:
 		return fmt.Errorf("Matrix: expected string or mapping, got %v", value.Kind)
 	}
+}
+
+// isExpressionScalar reports whether a node is a `${{ ... }}` expression.
+func isExpressionScalar(n *yaml.Node) bool {
+	if n.Kind != yaml.ScalarNode {
+		return false
+	}
+	v := strings.TrimSpace(n.Value)
+	return strings.HasPrefix(v, "${{") && strings.HasSuffix(v, "}}")
 }
 
 // decodeListOfMaps decodes a YAML sequence of mappings into []map[string]interface{}.

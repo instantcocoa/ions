@@ -174,8 +174,8 @@ func convertStep(s workflow.Step, index int) (JobStep, error) {
 		Enabled:     &enabled,
 	}
 
-	if len(s.Env) > 0 {
-		js.Environment = newTemplateTokenMappingWithExprs(s.Env)
+	if s.Env.Len() > 0 {
+		js.Environment = newTemplateTokenMappingWithExprs(s.Env.Values)
 	}
 
 	if s.ContinueOnError.IsExpr {
@@ -406,8 +406,8 @@ func containerToTemplateToken(c *workflow.Container) *TemplateToken {
 		pairs = append(pairs, TemplateTokenMapPair{Key: "options", Value: NewTemplateTokenString(c.Options)})
 	}
 
-	if len(c.Env) > 0 {
-		pairs = append(pairs, TemplateTokenMapPair{Key: "env", Value: NewTemplateTokenMapping(c.Env)})
+	if c.Env.Len() > 0 {
+		pairs = append(pairs, TemplateTokenMapPair{Key: "env", Value: NewTemplateTokenMapping(c.Env.Values)})
 	}
 
 	if len(c.Ports) > 0 {

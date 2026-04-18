@@ -46,8 +46,9 @@ type Server struct {
 	listener   net.Listener
 	httpServer *http.Server
 	mux        *http.ServeMux
-	baseURL    string
-	instanceID string // stable across all connectionData calls
+	baseURL     string
+	externalURL string
+	instanceID  string // stable across all connectionData calls
 	verbose    bool
 
 	// Session management.
@@ -113,6 +114,19 @@ type ServerConfig struct {
 	// GitHubToken is an optional token for authenticating action tarball
 	// downloads (needed for private repos).
 	GitHubToken string
+	// BindAddr is the TCP address the broker listens on. Defaults to
+	// "127.0.0.1:0". Use "0.0.0.0:0" when the broker must be reachable
+	// from sibling docker containers (job / service containers spawned
+	// by the runner that don't share the broker's netns).
+	BindAddr string
+	// ExternalHost is the hostname that SHOULD be used in URLs embedded
+	// in the job message, the runtime env vars, and artifact/cache
+	// service endpoints — i.e., what the runner tells job containers
+	// to contact. When ions runs inside a docker container, this is
+	// typically "host.docker.internal" (Desktop) or the gateway IP on
+	// the bridge. When empty, URLs keep the 127.0.0.1 host that works
+	// for same-netns callers.
+	ExternalHost string
 }
 
 // RouteRegistrar can register HTTP routes on the broker's mux.
@@ -122,14 +136,26 @@ type RouteRegistrar interface {
 
 // NewServer creates a new broker server listening on a random localhost port.
 func NewServer(cfg ServerConfig) (*Server, error) {
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	bind := cfg.BindAddr
+	if bind == "" {
+		bind = "127.0.0.1:0"
+	}
+	listener, err := net.Listen("tcp", bind)
 	if err != nil {
 		return nil, fmt.Errorf("cannot listen: %w", err)
 	}
 
+	port := listener.Addr().(*net.TCPAddr).Port
+	baseURL := fmt.Sprintf("http://127.0.0.1:%d", port)
+	externalURL := baseURL
+	if cfg.ExternalHost != "" {
+		externalURL = fmt.Sprintf("http://%s:%d", cfg.ExternalHost, port)
+	}
+
 	s := &Server{
 		listener:    listener,
-		baseURL:     fmt.Sprintf("http://127.0.0.1:%d", listener.Addr().(*net.TCPAddr).Port),
+		baseURL:     baseURL,
+		externalURL: externalURL,
 		instanceID:  uuid.New().String(),
 		verbose:      cfg.Verbose,
 		exprDefaults: cfg.ExprDefaults,
@@ -249,9 +275,16 @@ func (s *Server) Stop(ctx context.Context) error {
 	return s.httpServer.Shutdown(ctx)
 }
 
-// URL returns the base URL of the broker server.
+// URL returns the base URL of the broker server as reachable from the
+// ions process itself (same network namespace).
 func (s *Server) URL() string {
 	return s.baseURL
+}
+
+// ExternalURL returns the URL job containers should use to reach the
+// broker. Equals URL() unless ServerConfig.ExternalHost was set.
+func (s *Server) ExternalURL() string {
+	return s.externalURL
 }
 
 // EnqueueJob submits a job for the runner to pick up. Returns a channel

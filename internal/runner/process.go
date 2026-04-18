@@ -28,10 +28,12 @@ type ProcessConfig struct {
 
 // Process manages a single runner process lifecycle.
 type Process struct {
-	runnerDir string
-	workDir   string
-	brokerURL string
-	name      string
+	runnerDir   string // effective root — points at instanceDir
+	sharedDir   string // underlying install (symlink target)
+	instanceDir string // per-process dir, cleaned up on Stop
+	workDir     string
+	brokerURL   string
+	name        string
 
 	cmd          *exec.Cmd
 	stdout       io.ReadCloser
@@ -45,7 +47,13 @@ type Process struct {
 }
 
 // NewProcess creates a new runner process manager from the given config.
-// It validates required fields and applies defaults.
+// It validates required fields and applies defaults. Crucially, each
+// Process gets its own *instance directory* cloned from the shared runner
+// install — `.runner`, `.credentials`, and `_diag/` live in the instance,
+// while the big read-only subtrees (`bin/`, `externals/`, `*.sh`) are
+// symlinked back to the install. This lets multiple Processes (within a
+// single ions run AND across parallel ions-run invocations) execute
+// without racing on config files.
 func NewProcess(cfg ProcessConfig) (*Process, error) {
 	if cfg.RunnerDir == "" {
 		return nil, errors.New("RunnerDir is required")
@@ -56,16 +64,99 @@ func NewProcess(cfg ProcessConfig) (*Process, error) {
 	if cfg.Name == "" {
 		cfg.Name = "ions-runner"
 	}
-	if cfg.WorkDir == "" {
-		cfg.WorkDir = filepath.Join(cfg.RunnerDir, "_work")
+
+	instanceDir, err := materializeInstance(cfg.RunnerDir)
+	if err != nil {
+		return nil, fmt.Errorf("runner instance: %w", err)
 	}
+
+	workDir := cfg.WorkDir
+	if workDir == "" {
+		workDir = filepath.Join(instanceDir, "_work")
+	}
+
 	return &Process{
-		runnerDir: cfg.RunnerDir,
-		workDir:   cfg.WorkDir,
-		brokerURL: cfg.BrokerURL,
-		name:      cfg.Name,
-		extraEnv:  cfg.ExtraEnv,
+		runnerDir:   instanceDir,
+		sharedDir:   cfg.RunnerDir,
+		instanceDir: instanceDir,
+		workDir:     workDir,
+		brokerURL:   cfg.BrokerURL,
+		name:        cfg.Name,
+		extraEnv:    cfg.ExtraEnv,
 	}, nil
+}
+
+// materializeInstance creates a fresh per-process runner directory that
+// mirrors the shared install. The runner treats runnerDir as its
+// RootFolder; everything it writes (.runner, .credentials, _diag/,
+// _work/) lands inside the instance and is cleaned up on Stop.
+//
+// Subdirectories are recreated; their *files* are hardlinked to the
+// shared install. Hardlinks (rather than symlinks) matter because .NET's
+// Assembly.Location dereferences symlinks — so a symlinked Runner.Listener.dll
+// resolves back to the shared path, and the runner would treat the
+// shared dir as its RootFolder, defeating the isolation. Hardlinks
+// preserve the instance path while sharing the inode, so storage cost
+// is just directory-entry overhead (~1 MB for the full tree).
+//
+// If the shared dir doesn't exist yet (unit tests passing a stub path),
+// return an empty instance so the caller can proceed.
+func materializeInstance(sharedDir string) (string, error) {
+	instancesRoot := filepath.Join(filepath.Dir(sharedDir), "_instances")
+	if err := os.MkdirAll(instancesRoot, 0o755); err != nil {
+		return "", err
+	}
+	instanceDir, err := os.MkdirTemp(instancesRoot, "i-")
+	if err != nil {
+		return "", err
+	}
+
+	if _, err := os.Stat(sharedDir); err != nil {
+		if os.IsNotExist(err) {
+			return instanceDir, nil
+		}
+		return "", err
+	}
+
+	skip := map[string]bool{
+		"_diag": true, "_work": true, "_instances": true,
+		".runner": true, ".credentials": true, ".credentials_rsaparams": true,
+	}
+	err = filepath.Walk(sharedDir, func(path string, info os.FileInfo, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		rel, _ := filepath.Rel(sharedDir, path)
+		if rel == "." {
+			return nil
+		}
+		if skip[filepath.Base(rel)] && info.IsDir() {
+			return filepath.SkipDir
+		}
+		if skip[filepath.Base(rel)] {
+			return nil
+		}
+		dst := filepath.Join(instanceDir, rel)
+		if info.IsDir() {
+			return os.MkdirAll(dst, info.Mode().Perm())
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			target, linkErr := os.Readlink(path)
+			if linkErr != nil {
+				return linkErr
+			}
+			return os.Symlink(target, dst)
+		}
+		if err := os.Link(path, dst); err != nil {
+			return fmt.Errorf("link %s: %w", rel, err)
+		}
+		return nil
+	})
+	if err != nil {
+		_ = os.RemoveAll(instanceDir)
+		return "", err
+	}
+	return instanceDir, nil
 }
 
 // configMu serializes Configure+Start across processes. The runner reads
@@ -253,6 +344,8 @@ func (p *Process) Wait() error {
 // Stop gracefully shuts down the runner process and all its children.
 // Sends SIGINT to the process group first, waits up to 5 seconds, then SIGKILL.
 func (p *Process) Stop() error {
+	defer p.cleanupInstance()
+
 	p.mu.Lock()
 	cmd := p.cmd
 	done := p.done
@@ -292,6 +385,21 @@ func (p *Process) Stop() error {
 		return nil
 	}
 }
+
+// cleanupInstance removes the per-process instance directory. Safe to
+// call multiple times.
+func (p *Process) cleanupInstance() {
+	if p.instanceDir == "" {
+		return
+	}
+	_ = os.RemoveAll(p.instanceDir)
+	p.instanceDir = ""
+}
+
+// Dir returns the effective runner root directory for this Process (the
+// per-process instance dir, not the shared install). Config files and
+// work dirs live under this path.
+func (p *Process) Dir() string { return p.runnerDir }
 
 // IsRunning returns true if the runner process is currently running.
 func (p *Process) IsRunning() bool {

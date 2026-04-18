@@ -344,7 +344,7 @@ func TestContainerToTemplateToken_AllFields(t *testing.T) {
 	c := &workflow.Container{
 		Image:   "node:20",
 		Options: "--cpus 4 --memory 8g",
-		Env:     map[string]string{"NODE_ENV": "production", "DEBUG": "true"},
+		Env:     workflow.EnvMap{Values: map[string]string{"NODE_ENV": "production", "DEBUG": "true"}},
 		Ports:   []string{"3000:3000", "8080:8080"},
 		Volumes: []string{"/data:/data", "/logs:/logs"},
 	}
@@ -384,7 +384,7 @@ func TestServiceContainersToTemplateToken_Multiple(t *testing.T) {
 	services := map[string]*workflow.Container{
 		"postgres": {
 			Image: "postgres:15",
-			Env:   map[string]string{"POSTGRES_PASSWORD": "test"},
+			Env:   workflow.EnvMap{Values: map[string]string{"POSTGRES_PASSWORD": "test"}},
 			Ports: []string{"5432:5432"},
 		},
 		"redis": {

@@ -171,7 +171,7 @@ func TestBuildJobMessage_WithContainer_Default(t *testing.T) {
 		RunsOn: workflow.RunsOn{Labels: []string{"ubuntu-latest"}},
 		Container: &workflow.Container{
 			Image: "node:18",
-			Env:   map[string]string{"NODE_ENV": "test"},
+			Env:   workflow.EnvMap{Values: map[string]string{"NODE_ENV": "test"}},
 			Ports: []string{"3000:3000"},
 		},
 		Steps: []workflow.Step{
@@ -195,7 +195,7 @@ func TestBuildJobMessage_WithContainer_RunnerManaged(t *testing.T) {
 		RunsOn: workflow.RunsOn{Labels: []string{"ubuntu-latest"}},
 		Container: &workflow.Container{
 			Image:   "node:18",
-			Env:     map[string]string{"NODE_ENV": "test"},
+			Env:     workflow.EnvMap{Values: map[string]string{"NODE_ENV": "test"}},
 			Ports:   []string{"3000:3000"},
 			Options: "--cpus 2",
 		},
@@ -225,7 +225,7 @@ func TestBuildJobMessage_WithServices_Default(t *testing.T) {
 		Services: map[string]*workflow.Container{
 			"postgres": {
 				Image: "postgres:15",
-				Env:   map[string]string{"POSTGRES_PASSWORD": "test"},
+				Env:   workflow.EnvMap{Values: map[string]string{"POSTGRES_PASSWORD": "test"}},
 				Ports: []string{"5432:5432"},
 			},
 			"redis": {
@@ -256,7 +256,7 @@ func TestBuildJobMessage_WithServices_RunnerManaged(t *testing.T) {
 		Services: map[string]*workflow.Container{
 			"postgres": {
 				Image: "postgres:15",
-				Env:   map[string]string{"POSTGRES_PASSWORD": "test"},
+				Env:   workflow.EnvMap{Values: map[string]string{"POSTGRES_PASSWORD": "test"}},
 				Ports: []string{"5432:5432"},
 			},
 		},
@@ -319,7 +319,7 @@ func TestBuildJobMessage_DockerActionStep(t *testing.T) {
 				Name: "Run Alpine",
 				Uses: "docker://alpine:3.19",
 				With: map[string]string{"args": "echo hello"},
-				Env:  map[string]string{"MY_VAR": "test"},
+				Env:  workflow.EnvMap{Values: map[string]string{"MY_VAR": "test"}},
 			},
 		},
 	}
@@ -461,7 +461,7 @@ func TestBuildJobMessage_StepWithEnv(t *testing.T) {
 		Steps: []workflow.Step{
 			{
 				Run: "echo $FOO",
-				Env: map[string]string{"FOO": "bar"},
+				Env: workflow.EnvMap{Values: map[string]string{"FOO": "bar"}},
 			},
 		},
 	}

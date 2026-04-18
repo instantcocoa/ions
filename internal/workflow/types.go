@@ -2,6 +2,7 @@ package workflow
 
 import (
 	"fmt"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -87,6 +88,55 @@ func (e *ExprBool) UnmarshalYAML(value *yaml.Node) error {
 	default:
 		return fmt.Errorf("ExprBool: expected bool or string, got %v", value.Kind)
 	}
+}
+
+// EnvMap is the value of an `env:` block. GitHub permits either a mapping
+// of literal KEY=VALUE pairs, or a single `${{ ... }}` expression that
+// evaluates to such a mapping at runtime (e.g. reusable-workflow inputs
+// that serialize env as JSON via `fromJson(inputs.env-vars)`).
+type EnvMap struct {
+	Values     map[string]string
+	Expression string
+}
+
+// Map returns the resolved key/value pairs. When the env block is an
+// unresolved expression this is nil; callers that need the expression can
+// read it from Expression.
+func (e EnvMap) Map() map[string]string { return e.Values }
+
+// Len returns the number of resolved entries. An unresolved expression
+// reports zero, matching the zero-value semantics of `map[string]string`.
+func (e EnvMap) Len() int { return len(e.Values) }
+
+// UnmarshalYAML accepts either a mapping form or a scalar expression.
+func (e *EnvMap) UnmarshalYAML(value *yaml.Node) error {
+	switch value.Kind {
+	case yaml.ScalarNode:
+		v := strings.TrimSpace(value.Value)
+		if strings.HasPrefix(v, "${{") && strings.HasSuffix(v, "}}") {
+			e.Expression = value.Value
+			return nil
+		}
+		return fmt.Errorf("env: expected mapping or ${{ expression }}, got scalar %q", value.Value)
+	case yaml.MappingNode:
+		m := make(map[string]string)
+		if err := value.Decode(&m); err != nil {
+			return fmt.Errorf("env: failed to decode mapping: %w", err)
+		}
+		e.Values = m
+		return nil
+	default:
+		return fmt.Errorf("env: expected mapping or expression, got %v", value.Kind)
+	}
+}
+
+// MarshalYAML emits the mapping form (or the raw expression when unresolved).
+// Emitting nil-wrapped-in-empty would break round-trip tests.
+func (e EnvMap) MarshalYAML() (interface{}, error) {
+	if e.Expression != "" && len(e.Values) == 0 {
+		return e.Expression, nil
+	}
+	return e.Values, nil
 }
 
 // Environment can be a string (environment name) or object {name, url}.

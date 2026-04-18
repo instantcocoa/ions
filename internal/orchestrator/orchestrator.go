@@ -47,6 +47,30 @@ type Options struct {
 	ReuseContainers bool
 	Platform        string
 	GitHubToken     string
+
+	// AllowHostFallback permits host execution on darwin when the workflow
+	// asks for a Linux container that ions cannot start. Default is to
+	// refuse the run up-front so users don't get surprised by steps that
+	// silently shell out to the host toolchain.
+	AllowHostFallback bool
+
+	// BrokerBindAddr overrides the broker's TCP bind address. Empty =>
+	// 127.0.0.1:0. Set to "0.0.0.0:0" when ions runs inside a docker
+	// container and job containers need to reach the broker.
+	BrokerBindAddr string
+
+	// BrokerExternalHost is the hostname the broker advertises to job
+	// containers (in GITHUB_API_URL, ACTIONS_RUNTIME_URL, etc.). Empty
+	// => reuse 127.0.0.1. Typically "host.docker.internal" when
+	// running in Docker Desktop, or the docker0 bridge IP on Linux.
+	BrokerExternalHost string
+
+	// RunnerImage overrides the container image auto-injected for
+	// `runs-on: ubuntu-*` labels. The default (ubuntu:24.04) is a bare
+	// base image with no git/curl/docker/python — unsuitable for most
+	// real CI workflows. Point this at an act-style image like
+	// ghcr.io/catthehacker/ubuntu:act-24.04 to get preinstalled tools.
+	RunnerImage string
 }
 
 // RunResult captures the outcome of the full orchestrated run.
@@ -168,6 +192,9 @@ func (o *Orchestrator) Run(ctx context.Context) (*RunResult, error) {
 	// before graph building, so matrix expansion can produce concrete nodes.
 	resolveMatrixExpressions(w, initialCtx, fns)
 
+	// Pre-evaluate dynamic env expressions (e.g. env: ${{ fromJson(inputs.env-vars) }}).
+	resolveEnvExpressions(w, initialCtx, fns)
+
 	// Build graph.
 	g, err := graph.Build(w)
 	if err != nil {
@@ -231,6 +258,8 @@ func (o *Orchestrator) Run(ctx context.Context) (*RunResult, error) {
 		Verbose:      o.opts.Verbose,
 		ExprDefaults: exprDefaults,
 		GitHubToken:  o.opts.GitHubToken,
+		BindAddr:     o.opts.BrokerBindAddr,
+		ExternalHost: o.opts.BrokerExternalHost,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("broker: %w", err)
@@ -621,18 +650,45 @@ func (o *Orchestrator) executeJob(
 	// Auto-inject a container spec for standard GitHub-hosted runner labels
 	// so the runner executes inside Docker rather than on the host.
 	if node.Job.Container == nil {
-		if img := runsOnImage(node.Job.RunsOn.Labels); img != "" {
-			o.logger.StepOutput(node.NodeID, fmt.Sprintf("using container image %s for runs-on: %s",
-				img, strings.Join(node.Job.RunsOn.Labels, ", ")))
+		labels := node.Job.RunsOn.Labels
+		if img := runsOnImage(labels, o.opts.RunnerImage); img != "" {
+			if len(labels) == 1 && labels[0] != img && runsOnImageMap[labels[0]] == "" {
+				o.logger.StepOutput(node.NodeID, fmt.Sprintf(
+					"resolved runs-on %q -> %s (custom label)", labels[0], img))
+			} else {
+				o.logger.StepOutput(node.NodeID, fmt.Sprintf(
+					"using container image %s for runs-on: %s",
+					img, strings.Join(labels, ", ")))
+			}
 			node.Job.Container = &workflow.Container{Image: img}
+			o.attachDinDSupport(node.Job.Container, node.NodeID)
+		} else if isMacOSLabel(labels) && runtime.GOOS != "darwin" {
+			o.logger.StepOutput(node.NodeID, fmt.Sprintf(
+				"warning: runs-on %q names a macOS runner but host is %s; steps will run on the host and may fail",
+				strings.Join(labels, ", "), runtime.GOOS))
+		} else if len(labels) > 0 {
+			o.logger.StepOutput(node.NodeID, fmt.Sprintf(
+				"warning: runs-on %q not recognised; steps will run on the host",
+				strings.Join(labels, ", ")))
 		}
 	}
 
 	useRunnerContainers := node.Job.Container != nil && runtime.GOOS == "linux"
 
 	if node.Job.Container != nil && runtime.GOOS != "linux" {
+		if !o.opts.AllowHostFallback {
+			o.logger.StepOutput(node.NodeID, fmt.Sprintf(
+				"error: job container (%s) requires Linux — not available on %s. Pass --allow-host-fallback to run steps on the host anyway",
+				node.Job.Container.Image, runtime.GOOS))
+			o.logger.JobCompleted(node.NodeID, "failure", time.Since(start))
+			return &JobRunResult{
+				NodeID:   node.NodeID,
+				Status:   "failure",
+				Duration: time.Since(start),
+			}
+		}
 		o.logger.StepOutput(node.NodeID, fmt.Sprintf(
-			"warning: job container (%s) requires Linux — the runner's container support is not available on %s; steps will run on the host",
+			"warning: job container (%s) requires Linux — host fallback enabled, steps will run on %s",
 			node.Job.Container.Image, runtime.GOOS))
 	}
 
@@ -651,19 +707,24 @@ func (o *Orchestrator) executeJob(
 			}
 		}
 
+		jobCtxForCreds := o.buildContext(w, node, jobOutputs, nil, runID)
 		services := make(map[string]docker.ServiceConfig, len(node.Job.Services))
 		for name, svc := range node.Job.Services {
 			cfg := docker.ServiceConfig{
 				Image:   svc.Image,
-				Env:     svc.Env,
+				Env:     svc.Env.Values,
 				Ports:   svc.Ports,
 				Volumes: svc.Volumes,
 				Options: svc.Options,
 			}
 			if svc.Credentials != nil {
-				cfg.Credentials = &docker.RegistryCredentials{
-					Username: svc.Credentials.Username,
-					Password: svc.Credentials.Password,
+				user := interpolateOrEmpty(svc.Credentials.Username, jobCtxForCreds)
+				pass := interpolateOrEmpty(svc.Credentials.Password, jobCtxForCreds)
+				if user != "" && pass != "" {
+					cfg.Credentials = &docker.RegistryCredentials{
+						Username: user,
+						Password: pass,
+					}
 				}
 			}
 			services[name] = cfg
@@ -701,7 +762,7 @@ func (o *Orchestrator) executeJob(
 	if useRunnerContainers {
 		msgOpts = append(msgOpts, broker.JobMessageOptions{UseRunnerContainers: true})
 	}
-	msg, err := broker.BuildJobMessage(node, node.Job, jobCtx, brokerSrv.URL(), runID, o.opts.Secrets, msgOpts...)
+	msg, err := broker.BuildJobMessage(node, node.Job, jobCtx, brokerSrv.ExternalURL(), runID, o.opts.Secrets, msgOpts...)
 	if err != nil {
 		o.logger.JobCompleted(node.NodeID, "failure", time.Since(start))
 		return &JobRunResult{
@@ -736,14 +797,19 @@ func (o *Orchestrator) executeJob(
 
 	proc, err := runner.NewProcess(runner.ProcessConfig{
 		RunnerDir: runnerDir,
-		BrokerURL: brokerSrv.URL(),
+		BrokerURL: brokerSrv.URL(), // runner shares netns with broker
 		Name:      "ions-" + node.NodeID,
 		WorkDir:   workDir,
-		ExtraEnv: []string{
-			"GITHUB_SERVER_URL=" + brokerSrv.URL(),
-			"GITHUB_API_URL=" + brokerSrv.URL() + "/api/v3",
-			"GITHUB_GRAPHQL_URL=" + brokerSrv.URL() + "/api/v3/graphql",
-		},
+		// These env vars flow through the runner to the job environment
+		// and ultimately into child containers — so they must use the
+		// external URL when ions runs in a sibling container.
+		//
+		// GITHUB_SERVER_URL stays pointing at real github.com when we
+		// have a token: actions/checkout uses it as the clone origin,
+		// and the broker can't serve the git smart-http protocol. API
+		// and GraphQL stay redirected at the broker, since those are
+		// the parts we stub.
+		ExtraEnv: o.githubEnvForJob(brokerSrv),
 	})
 	if err != nil {
 		o.logger.JobCompleted(node.NodeID, "failure", time.Since(start))
@@ -907,7 +973,7 @@ func (o *Orchestrator) buildContext(
 
 	opts := ionsctx.BuilderOptions{
 		RepoPath:     o.opts.RepoPath,
-		WorkflowEnv:  mergeEnv(w.Env, o.opts.Env),
+		WorkflowEnv:  mergeEnv(w.Env.Values, o.opts.Env),
 		EventName:    o.opts.EventName,
 		WorkflowName: w.Name,
 		RunID:        runID,
@@ -923,11 +989,11 @@ func (o *Orchestrator) buildContext(
 
 	// If the broker is running, route API calls through it.
 	if o.broker != nil {
-		opts.APIBaseURL = o.broker.URL() + "/api/v3"
+		opts.APIBaseURL = o.broker.ExternalURL() + "/api/v3"
 	}
 
 	if node != nil {
-		opts.JobEnv = node.Job.Env
+		opts.JobEnv = node.Job.Env.Values
 		opts.MatrixValues = node.MatrixValues
 		opts.JobNeeds = node.Job.Needs
 		opts.JobIndex = node.JobIndex
@@ -950,11 +1016,16 @@ func (o *Orchestrator) dryRun(plan *graph.ExecutionPlan, start time.Time) (*RunR
 	fmt.Println("Dry run — execution plan:")
 	fmt.Println()
 
+	resolver := reusable.NewResolver(reusable.ResolverOptions{
+		RepoPath:    o.opts.RepoPath,
+		GitHubToken: o.opts.GitHubToken,
+	})
+	ctx := context.Background()
+
 	for i, group := range plan.Groups {
 		fmt.Printf("Stage %d:\n", i+1)
 		for _, node := range group.Nodes {
-			steps := len(node.Job.Steps)
-			fmt.Printf("  %s (%d step(s))\n", node.NodeID, steps)
+			o.printDryRunNode(ctx, node, resolver, "  ")
 		}
 	}
 
@@ -971,6 +1042,48 @@ func (o *Orchestrator) dryRun(plan *graph.ExecutionPlan, start time.Time) (*RunR
 		JobResults: make(map[string]*JobRunResult),
 		Duration:   time.Since(start),
 	}, nil
+}
+
+// printDryRunNode prints one job in the dry-run plan. If the job is a
+// reusable-workflow call (`uses:`), it attempts to resolve the called
+// workflow so the reported step count reflects what a real run will
+// actually execute. Remote refs (not `./...`) may fail offline; in that
+// case we report the reference itself and fall back to a 0-step summary.
+func (o *Orchestrator) printDryRunNode(ctx context.Context, node *graph.JobNode, resolver *reusable.Resolver, indent string) {
+	if node.Job.Uses == "" {
+		fmt.Printf("%s%s (%d step(s))\n", indent, node.NodeID, len(node.Job.Steps))
+		return
+	}
+
+	ref, err := reusable.ParseReference(node.Job.Uses)
+	if err != nil {
+		fmt.Printf("%s%s -> %s [invalid ref: %v]\n", indent, node.NodeID, node.Job.Uses, err)
+		return
+	}
+	called, err := resolver.Resolve(ctx, ref)
+	if err != nil {
+		fmt.Printf("%s%s -> %s [unresolved: %v]\n", indent, node.NodeID, node.Job.Uses, err)
+		return
+	}
+
+	calledGraph, err := graph.Build(called)
+	if err != nil {
+		fmt.Printf("%s%s -> %s [graph error: %v]\n", indent, node.NodeID, node.Job.Uses, err)
+		return
+	}
+
+	fmt.Printf("%s%s -> %s\n", indent, node.NodeID, node.Job.Uses)
+	groups, err := calledGraph.ParallelGroups()
+	if err != nil {
+		fmt.Printf("%s  [graph error: %v]\n", indent, err)
+		return
+	}
+	for si, sg := range groups {
+		fmt.Printf("%s  Stage %d:\n", indent, si+1)
+		for _, sn := range sg.Nodes {
+			o.printDryRunNode(ctx, sn, resolver, indent+"    ")
+		}
+	}
 }
 
 // filterPlan filters the execution plan to only include jobs matching the filter.
@@ -1120,11 +1233,61 @@ var runsOnImageMap = map[string]string{
 	"ubuntu-20.04":  "ubuntu:20.04",
 }
 
-func runsOnImage(labels []string) string {
+// runsOnImage resolves a single `runs-on` label to a container image. In
+// addition to GitHub's standard `ubuntu-*` labels it recognises common
+// third-party patterns (Depot's `depot-ubuntu-*`, self-hosted variants
+// containing `ubuntu`, and `*-latest-*` with a known OS stem) so that
+// ad-hoc labels don't silently fall back to host execution.
+//
+// If override is non-empty, it replaces the resolved image. This lets
+// users point every `runs-on: ubuntu-*` at a richer image (e.g. one of
+// catthehacker/ubuntu or nektos/act-environments-ubuntu) that has git,
+// curl, docker, node, python, etc. preinstalled — the stock ubuntu:24.04
+// image has almost nothing, so most real workflows fail inside it.
+func runsOnImage(labels []string, override string) string {
 	if len(labels) != 1 {
 		return ""
 	}
-	return runsOnImageMap[labels[0]]
+	label := labels[0]
+	if override != "" && isUbuntuLabel(label) {
+		return override
+	}
+	if img, ok := runsOnImageMap[label]; ok {
+		return img
+	}
+
+	lower := strings.ToLower(label)
+
+	// Known vendor prefixes that wrap an ubuntu runner.
+	if strings.HasPrefix(lower, "depot-ubuntu-24.04") || strings.Contains(lower, "ubuntu-24") {
+		return "ubuntu:24.04"
+	}
+	if strings.HasPrefix(lower, "depot-ubuntu-22.04") || strings.Contains(lower, "ubuntu-22") {
+		return "ubuntu:22.04"
+	}
+	if strings.HasPrefix(lower, "depot-ubuntu") || strings.Contains(lower, "ubuntu") {
+		return "ubuntu:24.04"
+	}
+	return ""
+}
+
+// isUbuntuLabel reports whether a runs-on label names an Ubuntu runner.
+// Used to decide whether a global --runner-image override applies.
+func isUbuntuLabel(label string) bool {
+	l := strings.ToLower(label)
+	return strings.Contains(l, "ubuntu")
+}
+
+// isMacOSLabel reports whether a runs-on label names a macOS runner. Ions
+// cannot host a Linux-only runner on macOS, and vice versa, so the caller
+// uses this to produce a clear up-front error instead of a mysterious
+// container failure.
+func isMacOSLabel(labels []string) bool {
+	if len(labels) != 1 {
+		return false
+	}
+	lower := strings.ToLower(labels[0])
+	return strings.Contains(lower, "macos") || strings.Contains(lower, "darwin")
 }
 
 // copyDir recursively copies src to dst, skipping the .ions-work and .git
@@ -1148,7 +1311,18 @@ func copyDir(src, dst string) error {
 				return filepath.SkipDir
 			}
 			switch base {
-			case "node_modules", "__pycache__", ".tox", ".mypy_cache", ".pytest_cache":
+			case "node_modules", "__pycache__", ".tox", ".mypy_cache", ".pytest_cache",
+				".terraform", ".venv", "venv",
+				".gradle", ".mvn", ".next", ".nuxt", ".svelte-kit",
+				".turbo", ".parcel-cache", ".rollup.cache":
+				return filepath.SkipDir
+			}
+			// Bazel writes `bazel-<workspace>`, `bazel-bin`, `bazel-out`, etc.
+			// at the workspace root. Those are convenience symlinks (skipped
+			// by the non-regular-file guard below) or genuine output trees
+			// (which can be hundreds of GB on a real monorepo). Neither is
+			// needed by CI — gitignored in every Bazel project.
+			if strings.HasPrefix(base, "bazel-") {
 				return filepath.SkipDir
 			}
 		}
@@ -1156,6 +1330,15 @@ func copyDir(src, dst string) error {
 		target := filepath.Join(dst, rel)
 		if d.IsDir() {
 			return os.MkdirAll(target, 0o755)
+		}
+
+		// Only regular files are copied. Symlinks (e.g. `bazel-*` output-tree
+		// convenience links that point at dangling build artifacts), sockets,
+		// devices, and pipes are skipped — attempting to open them as files
+		// produces confusing "is a directory" errors and rarely represents
+		// content the runner actually needs.
+		if !d.Type().IsRegular() {
+			return nil
 		}
 
 		return copyFile(path, target)
@@ -1255,17 +1438,19 @@ func (o *Orchestrator) executeReusableWorkflow(
 
 	// Build a context for the called workflow, with the mapped inputs.
 	calledOpts := Options{
-		RepoPath:        o.opts.RepoPath,
-		EventName:       o.opts.EventName,
-		Secrets:         calledSecrets,
-		Vars:            o.opts.Vars,
-		Env:             o.opts.Env,
-		Inputs:          calledInputs,
-		Verbose:         o.opts.Verbose,
-		ArtifactDir:     o.opts.ArtifactDir,
-		ReuseContainers: o.opts.ReuseContainers,
-		Platform:        o.opts.Platform,
-		GitHubToken:     o.opts.GitHubToken,
+		RepoPath:          o.opts.RepoPath,
+		EventName:         o.opts.EventName,
+		Secrets:           calledSecrets,
+		Vars:              o.opts.Vars,
+		Env:               o.opts.Env,
+		Inputs:            calledInputs,
+		Verbose:           o.opts.Verbose,
+		ArtifactDir:       o.opts.ArtifactDir,
+		ReuseContainers:   o.opts.ReuseContainers,
+		Platform:          o.opts.Platform,
+		GitHubToken:       o.opts.GitHubToken,
+		AllowHostFallback: o.opts.AllowHostFallback,
+		RunnerImage:       o.opts.RunnerImage,
 	}
 
 	// Build the initial context for planning the called workflow.
@@ -1346,59 +1531,210 @@ func resolveMatrixExpressions(w *workflow.Workflow, ctx expression.MapContext, f
 			continue
 		}
 		m := job.Strategy.Matrix
-		if m.Expression == "" {
+
+		if m.Expression != "" {
+			resolveWholeMatrixExpression(job, m, ctx, fns)
 			continue
 		}
 
-		// Strip ${{ }} wrapper if present.
-		expr := m.Expression
-		expr = strings.TrimSpace(expr)
-		if strings.HasPrefix(expr, "${{") && strings.HasSuffix(expr, "}}") {
-			expr = strings.TrimSpace(expr[3 : len(expr)-2])
-		}
-
-		// Skip expressions that reference needs.* — those can't be resolved statically.
-		if strings.Contains(expr, "needs.") {
+		// Per-dimension / per-include expressions.
+		if len(m.DimensionExpressions) == 0 && m.IncludeExpression == "" && m.ExcludeExpression == "" {
 			continue
 		}
 
-		result, err := expression.EvalExpressionWithFunctions(expr, ctx, fns)
-		if err != nil {
-			continue // Can't resolve — leave as expression for runtime
+		if m.Dimensions == nil {
+			m.Dimensions = make(map[string][]interface{})
 		}
 
-		// The result should be an object (map) with dimension keys → arrays.
-		fields := result.ObjectFields()
-		if fields == nil {
-			continue
+		for key, raw := range m.DimensionExpressions {
+			val, ok := evalMatrixExpression(raw, ctx, fns)
+			if !ok {
+				continue
+			}
+			arr := val.ArrayItems()
+			if arr == nil {
+				continue
+			}
+			vals := make([]interface{}, len(arr))
+			for i, elem := range arr {
+				vals[i] = expressionValueToInterface(elem)
+			}
+			m.Dimensions[key] = vals
+			delete(m.DimensionExpressions, key)
 		}
 
-		// Convert expression result back to a concrete Matrix.
-		newMatrix := &workflow.Matrix{
-			Dimensions: make(map[string][]interface{}),
-		}
-
-		for key, val := range fields {
-			switch key {
-			case "include":
-				newMatrix.Include = expressionValueToListOfMaps(val)
-			case "exclude":
-				newMatrix.Exclude = expressionValueToListOfMaps(val)
-			default:
-				// Dimension: expect an array of values.
-				arr := val.ArrayItems()
-				if arr != nil {
-					vals := make([]interface{}, len(arr))
-					for i, elem := range arr {
-						vals[i] = expressionValueToInterface(elem)
-					}
-					newMatrix.Dimensions[key] = vals
-				}
+		if m.IncludeExpression != "" {
+			if val, ok := evalMatrixExpression(m.IncludeExpression, ctx, fns); ok {
+				m.Include = expressionValueToListOfMaps(val)
+				m.IncludeExpression = ""
 			}
 		}
-
-		job.Strategy.Matrix = newMatrix
+		if m.ExcludeExpression != "" {
+			if val, ok := evalMatrixExpression(m.ExcludeExpression, ctx, fns); ok {
+				m.Exclude = expressionValueToListOfMaps(val)
+				m.ExcludeExpression = ""
+			}
+		}
 	}
+}
+
+// resolveEnvExpressions evaluates `env: ${{ ... }}` forms at workflow, job,
+// step, container, and service levels, promoting the result to a concrete
+// map[string]string. Expressions referencing needs.* are left alone — they
+// cannot be resolved until after upstream jobs run, and the runtime will
+// evaluate them in context.
+func resolveEnvExpressions(w *workflow.Workflow, ctx expression.MapContext, fns map[string]expression.Function) {
+	resolveOne := func(e *workflow.EnvMap) {
+		if e == nil || e.Expression == "" {
+			return
+		}
+		val, ok := evalMatrixExpression(e.Expression, ctx, fns)
+		if !ok {
+			return
+		}
+		fields := val.ObjectFields()
+		if fields == nil {
+			return
+		}
+		m := make(map[string]string, len(fields))
+		for k, v := range fields {
+			m[k] = v.StringVal()
+		}
+		e.Values = m
+		e.Expression = ""
+	}
+
+	resolveOne(&w.Env)
+	for _, job := range w.Jobs {
+		resolveOne(&job.Env)
+		if job.Container != nil {
+			resolveOne(&job.Container.Env)
+		}
+		for _, svc := range job.Services {
+			resolveOne(&svc.Env)
+		}
+		for i := range job.Steps {
+			resolveOne(&job.Steps[i].Env)
+		}
+	}
+}
+
+// githubEnvForJob returns the GITHUB_*_URL env vars the runner should
+// publish to each job. When a github token is configured, GITHUB_SERVER_URL
+// points at real github.com so actions/checkout's git clone works. Without
+// a token there's nothing for checkout to auth with, so we keep the URL
+// pointing at the broker (clone still fails but for the obvious reason).
+// API and GraphQL URLs always route to the broker's stub.
+func (o *Orchestrator) githubEnvForJob(brokerSrv *broker.Server) []string {
+	serverURL := brokerSrv.ExternalURL()
+	if o.opts.GitHubToken != "" {
+		serverURL = "https://github.com"
+	}
+	return []string{
+		"GITHUB_SERVER_URL=" + serverURL,
+		"GITHUB_API_URL=" + brokerSrv.ExternalURL() + "/api/v3",
+		"GITHUB_GRAPHQL_URL=" + brokerSrv.ExternalURL() + "/api/v3/graphql",
+	}
+}
+
+// attachDinDSupport decorates an auto-injected job container so that
+// docker-in-docker scripts inside it (e.g. the official trufflehog
+// action's `docker run -v .:/tmp ...`) can work even though the runner
+// bind-mounts the workspace at /__w inside the container — a path that
+// doesn't exist on the host where the real docker daemon runs.
+//
+// We install a small wrapper at /usr/local/bin/docker (earlier in PATH
+// than the image's real /usr/bin/docker) that rewrites any /__w source
+// path on -v/--volume/--mount to the host workdir before forwarding to
+// the real binary. IONS_HOST_WORK tells the wrapper what to substitute.
+func (o *Orchestrator) attachDinDSupport(c *workflow.Container, nodeID string) {
+	wrapper, err := dindWrapperPath()
+	if err != nil {
+		o.logger.StepOutput(nodeID, fmt.Sprintf("warning: could not stage DinD wrapper: %v", err))
+		return
+	}
+	hostWork := filepath.Join(o.opts.RepoPath, ".ions-work", sanitizePath(nodeID))
+
+	c.Volumes = append(c.Volumes, wrapper+":/usr/local/bin/docker:ro")
+	if c.Env.Values == nil {
+		c.Env.Values = map[string]string{}
+	}
+	c.Env.Values["IONS_HOST_WORK"] = hostWork
+	c.Env.Values["IONS_DOCKER_BIN"] = "/usr/bin/docker"
+}
+
+// interpolateOrEmpty evaluates `${{ ... }}` expressions embedded in s. If
+// the result still contains an unresolved expression (typical when a
+// secret was never provided) the caller usually wants an empty string so
+// it can fall back to anonymous access rather than passing the literal
+// expression text to an external command.
+func interpolateOrEmpty(s string, ctx expression.Context) string {
+	if s == "" {
+		return ""
+	}
+	val, err := expression.EvalInterpolation(s, ctx)
+	if err != nil {
+		return ""
+	}
+	if strings.Contains(val, "${{") {
+		return ""
+	}
+	return val
+}
+
+// evalMatrixExpression returns (value, true) if the raw expression string
+// could be evaluated statically, or (_, false) if it references runtime-only
+// values (needs.*) or fails to evaluate.
+func evalMatrixExpression(raw string, ctx expression.MapContext, fns map[string]expression.Function) (expression.Value, bool) {
+	expr := strings.TrimSpace(raw)
+	if strings.HasPrefix(expr, "${{") && strings.HasSuffix(expr, "}}") {
+		expr = strings.TrimSpace(expr[3 : len(expr)-2])
+	}
+	if strings.Contains(expr, "needs.") {
+		return expression.Value{}, false
+	}
+	val, err := expression.EvalExpressionWithFunctions(expr, ctx, fns)
+	if err != nil {
+		return expression.Value{}, false
+	}
+	return val, true
+}
+
+// resolveWholeMatrixExpression handles `matrix: ${{ fromJSON(...) }}`.
+func resolveWholeMatrixExpression(job *workflow.Job, m *workflow.Matrix, ctx expression.MapContext, fns map[string]expression.Function) {
+	result, ok := evalMatrixExpression(m.Expression, ctx, fns)
+	if !ok {
+		return
+	}
+
+	fields := result.ObjectFields()
+	if fields == nil {
+		return
+	}
+
+	newMatrix := &workflow.Matrix{
+		Dimensions: make(map[string][]interface{}),
+	}
+
+	for key, val := range fields {
+		switch key {
+		case "include":
+			newMatrix.Include = expressionValueToListOfMaps(val)
+		case "exclude":
+			newMatrix.Exclude = expressionValueToListOfMaps(val)
+		default:
+			arr := val.ArrayItems()
+			if arr != nil {
+				vals := make([]interface{}, len(arr))
+				for i, elem := range arr {
+					vals[i] = expressionValueToInterface(elem)
+				}
+				newMatrix.Dimensions[key] = vals
+			}
+		}
+	}
+
+	job.Strategy.Matrix = newMatrix
 }
 
 // expressionValueToInterface converts an expression.Value to a Go interface{}.
